@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comicforge-ai"
+version = "0.1.0"
+description = "A local mock demo for an AI-assisted comic creation platform."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "gradio>=5.0,<6.0",
+    "pillow>=10.0,<13.0",
+    "pydantic>=2.7,<3.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0,<10.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
