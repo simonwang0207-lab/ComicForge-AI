@@ -4,13 +4,11 @@ import os
 import sys
 from pathlib import Path
 
-
 # Keep the documented ``python app.py`` command working from a fresh checkout
 # without requiring an editable package install.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from comicforge_ai.ui import create_demo
-
 
 demo = create_demo()
 

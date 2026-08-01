@@ -3,8 +3,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
+.cache/
 
 # Virtual environments
 .venv/
@@ -16,10 +18,14 @@ venv/
 # Generated comics
 outputs/
 
-# Editors and operating systems
-.idea/
-.DS_Store
-Thumbs.db
+# Local model weights, caches, and temporary files
+*.gguf
+*.safetensors
+*.ckpt
+*.tmp
+*.log
+tmp/
+temp/
 
 # Editors and operating systems
 .vscode/

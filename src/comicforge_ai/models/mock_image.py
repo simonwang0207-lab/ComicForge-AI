@@ -87,7 +87,7 @@ class MockImageModel:
                 line_spacing=7,
             )
 
-        footer = f"MOCK IMAGE · {style} · {panel.caption}"
+        footer = f"MOCK IMAGE · {style} · {panel.narration}"
         self._draw_wrapped(
             draw,
             footer,
@@ -182,4 +182,3 @@ class MockImageModel:
             draw.text((x, y), line, font=font, fill=fill)
             y += line_height + line_spacing
         return y
-
