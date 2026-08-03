@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comicforge-ai"
-version = "0.2.0"
+version = "0.3.0"
 description = "A provider-based AI-assisted comic creation platform."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
@@ -13,6 +13,8 @@ dependencies = [
     "httpx>=0.24,<1.0",
     "pillow>=10.0,<13.0",
     "pydantic>=2.7,<3.0",
+    "python-dotenv>=1.0,<2.0",
+    "reportlab>=4.0,<5.0",
 ]
 
 [project.optional-dependencies]

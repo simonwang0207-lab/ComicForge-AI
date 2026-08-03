@@ -3,15 +3,28 @@
 from __future__ import annotations
 
 import platform
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from comicforge_ai.schemas import PanelSpec
+from comicforge_ai.models.image_base import (
+    ImageGeneration,
+    ImageModelStatus,
+    ImageProvider,
+    ImageProviderCapabilities,
+    ImageSaveError,
+    UnsupportedCapabilityError,
+)
+from comicforge_ai.schemas import ImageGenerationRequest, PanelSpec
 
 
-class MockImageModel:
+class MockImageModel(ImageProvider):
     """Render numbered storyboard placeholders instead of calling an image model."""
+
+    model_id = "mock-image"
+    display_name = "Mock Image（Pillow 占位图）"
+    provider_type = "mock"
 
     _backgrounds = (
         "#FFF1CC",
@@ -31,6 +44,126 @@ class MockImageModel:
         self.body_font = self._load_font(28)
         self.small_font = self._load_font(22)
         self.number_font = self._load_font(32, bold=True)
+
+    @property
+    def model_name(self) -> str:
+        return "pillow-placeholder-v1"
+
+    def check_availability(self) -> ImageModelStatus:
+        return self.validate_config()
+
+    def validate_config(self) -> ImageModelStatus:
+        return ImageModelStatus(
+            model_id=self.model_id,
+            display_name=self.display_name,
+            provider_type=self.provider_type,
+            model_name=self.model_name,
+            configured=True,
+            available=True,
+            message="内置 Pillow 占位图片始终可用",
+        )
+
+    def get_capabilities(self) -> ImageProviderCapabilities:
+        return ImageProviderCapabilities(
+            text_to_image=True,
+            seed=True,
+            arbitrary_size=True,
+        )
+
+    def generate(
+        self,
+        request: ImageGenerationRequest,
+        output_path: Path | None = None,
+    ) -> ImageGeneration:
+        started = time.perf_counter()
+        if request.panel is None:
+            raise ImageSaveError("Mock 漫画占位图需要分镜信息")
+        self.validate_request(request, operation="text_to_image")
+        image = self.generate_visual_panel(request.panel)
+        target_size = (self.width, self.height)
+        if request.width and request.height:
+            target_size = (request.width, request.height)
+        elif request.aspect_ratio:
+            target_size = self._size_from_ratio(request.aspect_ratio)
+        if image.size != target_size:
+            image = image.resize(target_size, Image.Resampling.LANCZOS)
+        output_paths: list[Path] = []
+        if output_path is not None:
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                image.save(output_path, format="PNG")
+                output_paths.append(output_path)
+            except OSError as exc:
+                raise ImageSaveError(
+                    f"Mock 分镜图片保存失败：{output_path.name}"
+                ) from exc
+        return ImageGeneration(
+            images=[image],
+            provider=self.model_id,
+            model=self.model_name,
+            provider_name=self.display_name,
+            duration=time.perf_counter() - started,
+            seed=request.seed,
+            actual_parameters={
+                "width": target_size[0],
+                "height": target_size[1],
+                "style": request.style,
+            },
+            raw_metadata={"mock": True},
+            output_paths=output_paths,
+        )
+
+    def generate_visual_panel(self, panel: PanelSpec) -> Image.Image:
+        """Create a text-free offline background for bubble/layout testing."""
+        image = Image.new(
+            "RGB",
+            (self.width, self.height),
+            self._backgrounds[(panel.sequence - 1) % len(self._backgrounds)],
+        )
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(
+            (0, int(self.height * 0.7), self.width, self.height),
+            fill="#B8D8C0",
+        )
+        positions = list(panel.character_positions.values()) or [
+            "bottom_left",
+            "bottom_right",
+        ]
+        for index, position in enumerate(positions[:3]):
+            center_x = int(self.width * (0.25 if "left" in position else 0.75))
+            if "center" in position:
+                center_x = self.width // 2
+            center_y = int(self.height * (0.56 if "top" in position else 0.66))
+            color = ("#FF8E72", "#5A7DCE", "#8B5FBF")[index % 3]
+            draw.ellipse(
+                (center_x - 52, center_y - 105, center_x + 52, center_y - 1),
+                fill=color,
+                outline="#273043",
+                width=4,
+            )
+            draw.ellipse(
+                (center_x - 34, center_y - 145, center_x + 34, center_y - 77),
+                fill="#FFD7B5",
+                outline="#273043",
+                width=4,
+            )
+        return image
+
+    def _size_from_ratio(self, value: str) -> tuple[int, int]:
+        separator = ":" if ":" in value else "x" if "x" in value.lower() else ""
+        if not separator:
+            raise UnsupportedCapabilityError(f"无法识别尺寸或宽高比：{value}")
+        left, right = value.lower().split(separator, maxsplit=1)
+        try:
+            width_ratio = float(left)
+            height_ratio = float(right)
+        except ValueError as exc:
+            raise UnsupportedCapabilityError(f"无法识别尺寸或宽高比：{value}") from exc
+        if width_ratio <= 0 or height_ratio <= 0:
+            raise UnsupportedCapabilityError(f"尺寸或宽高比必须为正数：{value}")
+        if separator == "x" and width_ratio >= 64 and height_ratio >= 64:
+            return int(width_ratio), int(height_ratio)
+        return self.width, max(64, round(self.width * height_ratio / width_ratio))
 
     def generate_panel(self, panel: PanelSpec, style: str) -> Image.Image:
         """Create one colorful placeholder panel containing its storyboard text."""

@@ -10,11 +10,15 @@ from comicforge_ai.models.base import (
     RemoteTextModelProvider,
     TextModelHttpError,
     TextModelNotFoundError,
+    TextModelOutputError,
     TextModelRequestError,
     TextModelStatus,
 )
 from comicforge_ai.models.http import HttpTimeout, HttpTransport, request_json
-from comicforge_ai.prompts import add_no_think_directive
+from comicforge_ai.prompts import (
+    add_no_think_directive,
+    add_truncation_retry_directive,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,8 @@ class OllamaTextModel(RemoteTextModelProvider):
         connect_timeout: float = 10,
         generation_timeout: float = 300,
         status_timeout: float = 10,
+        num_predict: int = 4096,
+        num_ctx: int = 8192,
         timeout: float | None = None,
         max_retries: int = 1,
         transport: HttpTransport = request_json,
@@ -48,6 +54,8 @@ class OllamaTextModel(RemoteTextModelProvider):
         self.connect_timeout = max(0.1, connect_timeout)
         self.generation_timeout = max(0.1, generation_timeout)
         self.status_timeout = max(0.1, status_timeout)
+        self.num_predict = max(1024, int(num_predict))
+        self.num_ctx = max(4096, int(num_ctx))
         self.transport = transport
         self.last_request_elapsed_seconds: float | None = None
         self.last_thinking_control = "not_requested"
@@ -149,6 +157,36 @@ class OllamaTextModel(RemoteTextModelProvider):
                 if self._is_model_not_found(retry_exc):
                     raise self._model_not_found_error(retry_exc) from retry_exc
                 raise
+        if str(response.get("done_reason", "")).lower() == "length":
+            retry_num_predict = max(
+                self.num_predict,
+                min(self.num_predict * 2, 16384),
+            )
+            retry_num_ctx = max(self.num_ctx, retry_num_predict * 2)
+            retry_messages = add_truncation_retry_directive(messages)
+            include_think: bool | None = False
+            if self.last_thinking_control == "prompt_no_think":
+                retry_messages = add_no_think_directive(retry_messages)
+                include_think = None
+            logger.warning(
+                "Ollama output was truncated; retrying from clean context: "
+                "model=%s num_predict=%d num_ctx=%d elapsed=%.2fs",
+                self._model_name,
+                retry_num_predict,
+                retry_num_ctx,
+                self.last_request_elapsed_seconds or 0,
+            )
+            response = self._send_chat(
+                retry_messages,
+                include_think=include_think,
+                num_predict=retry_num_predict,
+                num_ctx=retry_num_ctx,
+            )
+            if str(response.get("done_reason", "")).lower() == "length":
+                raise TextModelOutputError(
+                    "Ollama 输出达到长度上限；系统已自动扩大预算重试，但仍被截断。"
+                    "请提高 OLLAMA_NUM_PREDICT/OLLAMA_NUM_CTX，或缩短故事说明后重试。"
+                )
         message: Any = response.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
@@ -160,13 +198,21 @@ class OllamaTextModel(RemoteTextModelProvider):
         messages: list[dict[str, str]],
         *,
         include_think: bool | None,
+        num_predict: int | None = None,
+        num_ctx: int | None = None,
     ) -> dict[str, Any]:
+        actual_num_predict = num_predict or self.num_predict
+        actual_num_ctx = num_ctx or self.num_ctx
         payload: dict[str, Any] = {
             "model": self._model_name,
             "messages": messages,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.7},
+            "options": {
+                "temperature": 0.2,
+                "num_predict": actual_num_predict,
+                "num_ctx": actual_num_ctx,
+            },
         }
         if include_think is not None:
             payload["think"] = include_think

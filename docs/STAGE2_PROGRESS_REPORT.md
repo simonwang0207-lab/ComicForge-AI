@@ -223,6 +223,28 @@ $env:OLLAMA_GENERATION_TIMEOUT="300"
 
 这次验证确认了状态检测成功之后，正式 `/api/chat` 请求、`think=false`、长生成超时、JSON 提取与 Pydantic 校验、Provider 来源展示能够共同工作。该结果是一次本机人工验证，不会让 pytest 依赖 Ollama 服务或本地模型。
 
+### 10.1 中间出现的超时失败与解决过程
+
+首次进行真实生成时曾出现一个容易误判的问题：Ollama 状态检测成功，`qwen3:4b` 已加载，`ollama ps` 也显示模型正在使用 GPU，但点击“生成漫画”后，界面提示“无法连接模型服务或请求超时”，随后显式回退到 `comicforge-template-v2`。这说明状态检测链路正常，并不代表正式生成请求可以在原有超时窗口内完成。
+
+排查后确认需要同时处理两个问题：
+
+1. 状态检测请求很快，而本地大模型首次生成、Thinking 和结构化 JSON 输出需要明显更长时间。原实现未充分区分短连接/状态检测超时与长生成/读取超时，导致仍在生成中的请求被提前判定失败。
+2. `qwen3:4b` 默认可能进入 Thinking 过程，延长返回最终 JSON 的时间。仅在提示词中要求简洁输出不能稳定关闭该行为。
+
+对应解决方法如下：
+
+- 在 Ollama `/api/chat` 请求顶层显式发送 `"think": false`，优先使用 API 原生 Thinking 控制。
+- 如果旧版 Ollama 明确拒绝 `think` 字段，则自动改用带 `/no_think` 的提示词重试，并记录 Thinking 控制方式。
+- 将连接超时和生成/读取超时拆开：连接超时默认 10 秒，生成超时默认提高到 300 秒。
+- 支持使用 `TEXT_MODEL_CONNECT_TIMEOUT`、`TEXT_MODEL_GENERATION_TIMEOUT`、`OLLAMA_CONNECT_TIMEOUT` 和 `OLLAMA_GENERATION_TIMEOUT` 分别配置超时。
+- 将异常细分为连接失败、生成超时、HTTP 错误和模型不存在，避免所有失败都显示为同一条模糊提示。
+- 记录请求实际耗时和原始异常类型，供 UI 显示和问题诊断使用；记录内容不包含 API Key、请求头或完整响应正文。
+- 保留真实 Provider 最终失败后的显式 Mock 回退，但界面必须显示请求 Provider、实际 Provider、回退状态和失败原因，不能把 Mock 结果伪装成真实生成。
+- 使用注入的 Mock HTTP transport 增加自动化测试，覆盖 `think=false`、`/no_think` 兼容重试、独立超时、错误分类、耗时/原始异常保留和 Mock 回退，不访问真实 Ollama。
+
+修复后再次使用同一 `qwen3:4b` 进行本机验证，约 15.04 秒完成正式文本生成，Thinking 控制显示为 `api_think_false`，实际 Provider 为 Ollama 本地模型，未发生 Mock 回退。由此确认先前问题来自正式生成请求的 Thinking 与超时处理，而不是 Ollama 状态检测、GPU 加载或模型缺失。
+
 ## 11. 配置 OpenAI-compatible API
 
 在本机启动终端设置：

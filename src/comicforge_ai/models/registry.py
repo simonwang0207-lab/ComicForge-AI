@@ -80,6 +80,8 @@ def build_default_registry(
                     env, "OLLAMA_GENERATION_TIMEOUT", generation_timeout
                 ),
                 status_timeout=status_timeout,
+                num_predict=_integer_setting(env, "OLLAMA_NUM_PREDICT", 4096),
+                num_ctx=_integer_setting(env, "OLLAMA_NUM_CTX", 8192),
                 max_retries=retries,
             ),
             OpenAICompatibleTextModel(

@@ -38,3 +38,5 @@ def test_registry_configures_separate_ollama_timeouts() -> None:
     assert provider.connect_timeout == 4  # type: ignore[attr-defined]
     assert provider.generation_timeout == 345  # type: ignore[attr-defined]
     assert provider.status_timeout == 7  # type: ignore[attr-defined]
+    assert provider.num_predict == 4096  # type: ignore[attr-defined]
+    assert provider.num_ctx == 8192  # type: ignore[attr-defined]

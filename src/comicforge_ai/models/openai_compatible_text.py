@@ -127,7 +127,8 @@ class OpenAICompatibleTextModel(RemoteTextModelProvider):
             {
                 "model": self._model_name,
                 "messages": messages,
-                "temperature": 0.7,
+                # Structured project JSON benefits from deterministic output.
+                "temperature": 0.2,
                 "response_format": {"type": "json_object"},
             },
             HttpTimeout(

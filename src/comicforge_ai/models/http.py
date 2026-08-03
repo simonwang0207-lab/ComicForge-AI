@@ -6,7 +6,9 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from ipaddress import ip_address
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -19,6 +21,17 @@ from comicforge_ai.models.base import (
 
 logger = logging.getLogger(__name__)
 JsonObject = dict[str, Any]
+
+
+def _trust_environment_for_url(url: str) -> bool:
+    """Never route a loopback model service through an environment proxy."""
+    hostname = (urlsplit(url).hostname or "").rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return False
+    try:
+        return not ip_address(hostname).is_loopback
+    except ValueError:
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +84,7 @@ def request_json(
             headers={"Accept": "application/json", **headers},
             json=payload,
             timeout=request_timeout,
+            trust_env=_trust_environment_for_url(url),
         )
     except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
         elapsed = time.perf_counter() - started

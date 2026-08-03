@@ -1,13 +1,55 @@
 """ComicForge AI comic generation package."""
 
-from comicforge_ai.schemas import CharacterProfile, ComicPage, ComicProject, PanelSpec
-from comicforge_ai.service import ComicGenerationResult, ComicGenerator
+from comicforge_ai.schemas import (
+    CharacterProfile,
+    ComicLocalization,
+    ComicPage,
+    ComicProject,
+    ComicTextItem,
+    ContentLanguage,
+    CustomFrameType,
+    CustomPanelFrame,
+    ImageGenerationRequest,
+    LayoutMode,
+    LetteringStyle,
+    PanelImageRecord,
+    PanelImageRequest,
+    PanelSpec,
+    PanelTextLocalization,
+    RevisionTurn,
+    StoryBible,
+    SubShot,
+)
+from comicforge_ai.service import (
+    ComicGenerationResult,
+    ComicGenerator,
+    ComicRelocalizationResult,
+    ImageGenerationOptions,
+    ScriptGenerationResult,
+)
 
 __all__ = [
     "CharacterProfile",
     "ComicGenerationResult",
     "ComicGenerator",
+    "ComicLocalization",
     "ComicPage",
     "ComicProject",
+    "ComicRelocalizationResult",
+    "ComicTextItem",
+    "ContentLanguage",
+    "CustomFrameType",
+    "CustomPanelFrame",
+    "ImageGenerationOptions",
+    "ImageGenerationRequest",
+    "LayoutMode",
+    "LetteringStyle",
+    "PanelImageRecord",
+    "PanelImageRequest",
     "PanelSpec",
+    "PanelTextLocalization",
+    "RevisionTurn",
+    "ScriptGenerationResult",
+    "StoryBible",
+    "SubShot",
 ]

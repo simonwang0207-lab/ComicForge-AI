@@ -9,6 +9,56 @@ from comicforge_ai.models.base import (
 from comicforge_ai.models.http import HttpTimeout, request_json
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:11434/api/chat",
+        "http://127.1.2.3:11434/api/chat",
+        "http://localhost:11434/api/chat",
+        "http://ollama.localhost:11434/api/chat",
+        "http://[::1]:11434/api/chat",
+    ],
+)
+def test_loopback_model_requests_ignore_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def capture_request(*args: object, **kwargs: object) -> httpx.Response:
+        captured.update(kwargs)
+        return httpx.Response(
+            200,
+            json={"ok": True},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "request", capture_request)
+
+    assert request_json("GET", url, {}, None, HttpTimeout()) == {"ok": True}
+    assert captured["trust_env"] is False
+
+
+def test_remote_model_requests_keep_environment_proxy_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    url = "https://models.example.test/v1/chat/completions"
+
+    def capture_request(*args: object, **kwargs: object) -> httpx.Response:
+        captured.update(kwargs)
+        return httpx.Response(
+            200,
+            json={"ok": True},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "request", capture_request)
+
+    request_json("POST", url, {}, {"model": "demo"}, HttpTimeout())
+    assert captured["trust_env"] is True
+
+
 def test_connection_failure_keeps_original_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     original = httpx.ConnectError(
         "connection refused",

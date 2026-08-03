@@ -4,6 +4,10 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv(override=False)
+
 # Keep the documented ``python app.py`` command working from a fresh checkout
 # without requiring an editable package install.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
