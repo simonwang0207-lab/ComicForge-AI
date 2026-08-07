@@ -1,4 +1,7 @@
+import json
 from collections.abc import Iterator
+
+import pytest
 
 from comicforge_ai.models.base import RemoteTextModelProvider, TextModelStatus
 from comicforge_ai.models.mock_text import MockTextModel
@@ -87,11 +90,182 @@ def test_invalid_review_json_uses_safe_repair_retry() -> None:
     assert "无法通过结构校验" in provider.messages[2][-1]["content"]
 
 
+def test_partial_review_character_inherits_validated_draft_fields() -> None:
+    draft, reviewed = _draft_and_review()
+    reviewed_payload = reviewed.model_dump(mode="json")
+    reviewed_payload["characters"][0] = {
+        "name": draft.characters[0].name,
+        "personality": "审查后更加谨慎",
+    }
+    provider = ReviewProvider(
+        [
+            draft.model_dump_json(),
+            json.dumps(reviewed_payload, ensure_ascii=False),
+        ]
+    )
+
+    result = provider.generate_reviewed_project("角色字段继承", "水彩", 4)
+
+    assert result.characters[0].personality == "审查后更加谨慎"
+    assert result.characters[0].role == draft.characters[0].role
+    assert result.characters[0].appearance == draft.characters[0].appearance
+    assert result.characters[0].visual_prompt == draft.characters[0].visual_prompt
+    assert result.characters[0].entity_type == draft.characters[0].entity_type
+    assert (
+        result.characters[0].body_structure
+        == draft.characters[0].body_structure
+    )
+    assert (
+        result.story_bible.visual_style_prompt
+        == draft.story_bible.visual_style_prompt
+    )
+    assert len(provider.messages) == 2
+
+
+def test_partial_review_panel_inherits_validated_draft_fields() -> None:
+    draft, reviewed = _draft_and_review()
+    reviewed_payload = reviewed.model_dump(mode="json")
+    reviewed_payload["panels"][0].pop("characters")
+    reviewed_payload["panels"][0].pop("image_prompt")
+    reviewed_payload["panels"][0]["action"] = "审查后调整的动作"
+    provider = ReviewProvider(
+        [
+            draft.model_dump_json(),
+            json.dumps(reviewed_payload, ensure_ascii=False),
+        ]
+    )
+
+    result = provider.generate_reviewed_project("分镜字段继承", "水彩", 4)
+
+    assert result.panels[0].action == "审查后调整的动作"
+    assert result.panels[0].characters == draft.panels[0].characters
+    assert result.panels[0].image_prompt == draft.panels[0].image_prompt
+    assert len(provider.messages) == 2
+
+
+def test_partial_story_bible_character_inherits_name_and_identity() -> None:
+    draft, reviewed = _draft_and_review()
+    reviewed_payload = reviewed.model_dump(mode="json")
+    reviewed_payload["story_bible"]["characters"][0] = {
+        "motivation": "审查后修正的动机"
+    }
+    provider = ReviewProvider(
+        [
+            draft.model_dump_json(),
+            json.dumps(reviewed_payload, ensure_ascii=False),
+        ]
+    )
+
+    result = provider.generate_reviewed_project("故事圣经字段继承", "水彩", 4)
+
+    character = result.story_bible.characters[0]
+    assert character.name == draft.story_bible.characters[0].name
+    assert character.identity == draft.story_bible.characters[0].identity
+    assert character.motivation == "审查后修正的动机"
+    assert len(provider.messages) == 2
+
+
+def test_compact_review_patch_updates_only_selected_panel_fields() -> None:
+    draft = MockTextModel().generate_project("紧凑审查", "漫画", 4)
+    patch = {
+        "project_patch": {
+            "panels": [
+                {
+                    "sequence": 2,
+                    "action": "审查后更清晰的静态动作",
+                    "dialogue": "小漫：现在行动！",
+                }
+            ]
+        },
+        "review_notes": ["修正第二格动作"],
+        "script_reviewed": True,
+    }
+    provider = ReviewProvider([json.dumps(patch, ensure_ascii=False)])
+
+    reviewed = provider.review_project(draft)
+
+    assert reviewed.panels[1].action == "审查后更清晰的静态动作"
+    assert reviewed.panels[1].image_prompt == draft.panels[1].image_prompt
+    assert reviewed.panels[0] == draft.panels[0]
+    assert reviewed.review_notes == ["修正第二格动作"]
+
+
+@pytest.mark.parametrize(
+    ("bad_item", "expected_type", "expected_text"),
+    [
+        ({"type": "dialogue", "content": "现在出发"}, "speech", "现在出发"),
+        ({"type": "对白", "dialogue": "快躲开", "speaker": "小漫"}, "speech", "快躲开"),
+        ({"kind": "旁白", "value": "夜幕降临"}, "narration", "夜幕降临"),
+        ({"category": "sound_effect", "sfx": "轰隆"}, "sfx", "轰隆"),
+        ({"narration": "城市恢复平静"}, "narration", "城市恢复平静"),
+    ],
+)
+def test_review_patch_normalizes_nonstandard_text_items(
+    bad_item: dict[str, object],
+    expected_type: str,
+    expected_text: str,
+) -> None:
+    draft = MockTextModel().generate_project("文字项兼容", "漫画", 2)
+    patch = {
+        "project_patch": {
+            "panels": [{"sequence": 1, "text_items": [bad_item]}]
+        },
+        "review_notes": [],
+        "script_reviewed": True,
+    }
+    provider = ReviewProvider([json.dumps(patch, ensure_ascii=False)])
+
+    reviewed = provider.review_project(draft)
+
+    item = reviewed.panels[0].text_items[0]
+    assert item.type == expected_type
+    assert item.text == expected_text
+
+
+def test_review_patch_preserves_draft_text_when_all_items_are_unusable() -> None:
+    draft = MockTextModel().generate_project("坏文字项回退", "漫画", 2)
+    original = [item.model_copy(deep=True) for item in draft.panels[0].text_items]
+    patch = {
+        "project_patch": {
+            "panels": [
+                {
+                    "sequence": 1,
+                    "text_items": [
+                        {"type": "unknown"},
+                        {"content": ""},
+                        "not-an-object",
+                    ],
+                }
+            ]
+        },
+        "review_notes": [],
+        "script_reviewed": True,
+    }
+    provider = ReviewProvider([json.dumps(patch, ensure_ascii=False)])
+
+    reviewed = provider.review_project(draft)
+
+    assert reviewed.panels[0].text_items == original
+
+
 def test_review_prompt_contains_story_bible_and_fact_checks() -> None:
     project = MockTextModel().generate_project("历史故事", "漫画", 4)
     content = build_story_review_messages(project)[-1]["content"]
 
     assert "story_bible" in content
+
+
+def test_review_prompt_uses_compact_narrative_snapshot() -> None:
+    project = MockTextModel().generate_project("紧凑审查上下文", "漫画", 6)
+    project.panels[0].image_prompt = "very long visual prompt " * 200
+
+    content = build_story_review_messages(project)[-1]["content"]
+
+    assert "very long visual prompt" not in content
+    assert '"image_prompt"' not in content
+    assert "不要返回或修改 image_prompt" in content
+    assert '"scene"' in content
+    assert '"story_bible"' in content
     assert "事实冲突" in content
     assert "角色、道具和场景状态" in content
 
@@ -164,7 +338,7 @@ def test_user_story_guidance_prompt_preserves_request_context() -> None:
     assert "全部 6 格分镜" in content
     assert "不要沿用与它冲突的旧情节" in content
     assert "story 控制在 300 字以内" in content
-    assert "image_prompt 控制在 220 字以内" in content
+    assert "image_prompt 只使用英文" in content
 
 
 def test_first_generation_can_use_an_authoritative_user_script() -> None:
@@ -185,3 +359,11 @@ def test_first_generation_can_use_an_authoritative_user_script() -> None:
     assert "最高优先级内容依据" in prompt
     assert "不得另编一套故事" in prompt
     assert "用户没有提供完整剧本" not in prompt
+
+
+def test_generation_prompt_separates_identity_from_panel_scene_prompt() -> None:
+    messages = build_comic_generation_messages("任意主题", "任意风格", 3)
+
+    assert "适用时明确正常的数量" in messages[0]["content"]
+    assert "不要重复堆叠角色外貌、器官或" in messages[-1]["content"]
+    assert "这些固定身份信息由 characters 字段统一提供" in messages[-1]["content"]

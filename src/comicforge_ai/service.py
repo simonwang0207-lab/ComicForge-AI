@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import secrets
+import shutil
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +23,7 @@ from comicforge_ai.layout import (
     compose_comic,
     custom_frame_for_sequence,
     custom_panel_render_size,
+    panel_target_aspect_ratio,
     prepare_panel_with_bubbles,
     validate_custom_layout,
 )
@@ -32,13 +37,19 @@ from comicforge_ai.models import (
     build_default_image_registry,
     build_default_registry,
 )
-from comicforge_ai.models.base import TextModelError
+from comicforge_ai.models.base import (
+    TextModelError,
+    TextModelResourceReleaseStatus,
+)
 from comicforge_ai.models.image_base import (
     ImageModelError,
     ImageSaveError,
     UnsupportedCapabilityError,
 )
-from comicforge_ai.prompts import build_panel_image_request
+from comicforge_ai.prompts import (
+    build_panel_image_request,
+    build_panel_negative_prompt,
+)
 from comicforge_ai.schemas import (
     ComicLocalization,
     ComicPage,
@@ -49,6 +60,7 @@ from comicforge_ai.schemas import (
     LayoutMode,
     LetteringStyle,
     PanelImageRecord,
+    PanelImageVersion,
     PanelSpec,
     PanelTextLocalization,
     RevisionTurn,
@@ -79,6 +91,9 @@ class ImageGenerationOptions:
     show_narration: bool = True
     show_panel_numbers: bool = False
     auto_shorten_dialogue: bool = True
+    reference_source: str = ""
+    reference_panel_sequence: int | None = None
+    reference_character_names: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -96,6 +111,10 @@ class ComicGenerationResult:
     requested_provider_seconds: float = 0
     actual_provider_seconds: float = 0
     thinking_control: str = ""
+    text_resource_release_attempted: bool = False
+    text_resource_release_succeeded: bool = False
+    text_resource_release_message: str = ""
+    text_resource_release_seconds: float = 0
     requested_image_provider_id: str = "mock-image"
     actual_image_provider_names: tuple[str, ...] = ()
     actual_image_model_names: tuple[str, ...] = ()
@@ -180,10 +199,24 @@ def _environment_integer(name: str, default: int) -> int:
 
 
 def normalize_optional_seed(value: float | None) -> int | None:
-    """Treat zero/empty UI values as automatic Provider-side seed selection."""
+    """Treat zero/empty values as automatic system-side seed selection."""
     if value is None or int(value) == 0:
         return None
     return int(value)
+
+
+def resolve_system_image_seed(
+    value: float | None,
+    *,
+    provider_supports_seed: bool,
+) -> int | None:
+    """Return an internal base seed only when the selected Provider supports it."""
+    requested = normalize_optional_seed(value)
+    if requested is not None:
+        return requested
+    if not provider_supports_seed:
+        return None
+    return secrets.randbelow(2_147_000_000) + 1
 
 
 def enhance_multi_shot_compositions(project: ComicProject) -> ComicProject:
@@ -309,6 +342,7 @@ class ComicGenerator:
         fallback_to_mock: bool | None = None,
         image_fallback_to_mock: bool | None = None,
         image_fallback_chain: tuple[str, ...] | None = None,
+        release_text_model_before_local_image: bool | None = None,
     ) -> None:
         self.registry = registry or build_default_registry()
         self.image_registry = image_registry or build_default_image_registry()
@@ -331,6 +365,11 @@ class ComicGenerator:
             tuple(item.strip() for item in configured_chain.split(",") if item.strip())
             if image_fallback_chain is None
             else image_fallback_chain
+        )
+        self.release_text_model_before_local_image = (
+            _environment_flag("RELEASE_TEXT_MODEL_BEFORE_LOCAL_IMAGE", True)
+            if release_text_model_before_local_image is None
+            else release_text_model_before_local_image
         )
         configured_dir = output_dir or os.getenv("COMICFORGE_OUTPUT_DIR", "outputs")
         self.output_dir = Path(configured_dir)
@@ -398,6 +437,10 @@ class ComicGenerator:
             )
         except KeyError as exc:
             raise ImageModelError(str(exc)) from exc
+        release_status = self._release_text_resources_before_image(
+            provider_id,
+            image_provider,
+        )
         rendered = self._render_and_save(project, image_provider, image_options)
         return ComicGenerationResult(
             project=project,
@@ -413,6 +456,10 @@ class ComicGenerator:
             thinking_control=str(
                 getattr(requested_provider, "last_thinking_control", "")
             ),
+            text_resource_release_attempted=release_status.attempted,
+            text_resource_release_succeeded=release_status.released,
+            text_resource_release_message=release_status.message,
+            text_resource_release_seconds=release_status.elapsed_seconds,
             requested_image_provider_id=rendered.requested_provider_id,
             actual_image_provider_names=rendered.actual_provider_names,
             actual_image_model_names=rendered.actual_model_names,
@@ -436,18 +483,25 @@ class ComicGenerator:
         layout_mode: LayoutMode = "grid",
         allow_multi_shot_panels: bool = False,
         source_story: str = "",
+        review_provider_id: str = "",
     ) -> ScriptGenerationResult:
         """Generate, review, and revise a script without spending image credits."""
         try:
             requested_provider = self.registry.get(provider_id)
         except KeyError as exc:
             raise TextModelError(str(exc)) from exc
+        try:
+            review_provider = self.registry.get(review_provider_id or provider_id)
+        except KeyError as exc:
+            raise TextModelError(str(exc)) from exc
+        requested_review_provider = review_provider
         actual_provider = requested_provider
+        review_applied = False
         fallback_used = False
         fallback_reason = ""
         started = time.perf_counter()
         try:
-            project = requested_provider.generate_reviewed_project(
+            draft = requested_provider.generate_project(
                 theme,
                 style,
                 int(panel_count),
@@ -457,7 +511,6 @@ class ComicGenerator:
                 source_story,
             )
             requested_seconds = time.perf_counter() - started
-            actual_seconds = requested_seconds
         except Exception as exc:
             requested_seconds = time.perf_counter() - started
             if provider_id == "mock" or not self.fallback_to_mock:
@@ -467,6 +520,7 @@ class ComicGenerator:
             fallback_used = True
             fallback_reason = str(exc) or type(exc).__name__
             actual_provider = self.registry.get("mock")
+            review_provider = actual_provider
             fallback_started = time.perf_counter()
             project = actual_provider.generate_reviewed_project(
                 theme,
@@ -477,17 +531,52 @@ class ComicGenerator:
                 allow_multi_shot_panels,
                 source_story,
             )
+            review_applied = True
             actual_seconds = time.perf_counter() - fallback_started
+        else:
+            try:
+                project = review_provider.review_project(draft)
+                review_applied = True
+            except TextModelError as exc:
+                project = draft.model_copy(deep=True)
+                project.script_reviewed = False
+                review_failure = str(exc) or type(exc).__name__
+                project.review_notes.append(
+                    "独立审查未应用，已保留通过结构校验的初稿："
+                    + review_failure
+                )
+                fallback_reason = "审查未应用：" + review_failure
+            actual_seconds = time.perf_counter() - started
         project.content_language = language
         project.layout_mode = layout_mode
         project.allow_multi_shot_panels = allow_multi_shot_panels
+        project.requested_text_provider = requested_provider.model_id
+        project.requested_text_model = requested_provider.model_name
+        project.actual_text_provider = actual_provider.model_id
+        project.actual_text_model = actual_provider.model_name
+        project.requested_review_provider = requested_review_provider.model_id
+        project.requested_review_model = requested_review_provider.model_name
+        project.actual_review_provider = review_provider.model_id
+        project.actual_review_model = review_provider.model_name
+        project.review_applied = review_applied
         enhance_multi_shot_compositions(project)
         return ScriptGenerationResult(
             project=project,
             requested_provider_id=provider_id,
             actual_provider_id=actual_provider.model_id,
-            actual_provider_name=actual_provider.display_name,
-            actual_model_name=actual_provider.model_name,
+            actual_provider_name=(
+                f"{actual_provider.display_name}（审查未应用）"
+                if not review_applied
+                else actual_provider.display_name
+                if review_provider.model_id == actual_provider.model_id
+                else f"{actual_provider.display_name} → {review_provider.display_name} 审查"
+            ),
+            actual_model_name=(
+                actual_provider.model_name
+                if not review_applied
+                or review_provider.model_id == actual_provider.model_id
+                else f"{actual_provider.model_name} → {review_provider.model_name}"
+            ),
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
             requested_provider_seconds=requested_seconds,
@@ -586,6 +675,8 @@ class ComicGenerator:
         project: ComicProject,
         image_provider_id: str = "mock-image",
         image_options: ImageGenerationOptions | None = None,
+        *,
+        text_provider_id: str = "",
     ) -> ComicGenerationResult:
         """Invoke image Providers only after the caller confirms the script."""
         try:
@@ -594,6 +685,10 @@ class ComicGenerator:
             raise ImageModelError(str(exc)) from exc
         if project.layout_mode == "custom_page":
             validate_custom_layout(project.custom_layout, project.panel_count)
+        release_status = self._release_text_resources_before_image(
+            text_provider_id,
+            image_provider,
+        )
         rendered = self._render_and_save(project, image_provider, image_options)
         return ComicGenerationResult(
             project=project,
@@ -602,6 +697,10 @@ class ComicGenerator:
             actual_provider_id="confirmed-script",
             actual_provider_name="已确认并审查的剧本",
             actual_model_name="script-state",
+            text_resource_release_attempted=release_status.attempted,
+            text_resource_release_succeeded=release_status.released,
+            text_resource_release_message=release_status.message,
+            text_resource_release_seconds=release_status.elapsed_seconds,
             requested_image_provider_id=rendered.requested_provider_id,
             actual_image_provider_names=rendered.actual_provider_names,
             actual_image_model_names=rendered.actual_model_names,
@@ -614,6 +713,235 @@ class ComicGenerator:
             comic_pdf_path=rendered.pdf_path,
             project_json_path=rendered.project_json_path,
         )
+
+    def regenerate_panel(
+        self,
+        project: ComicProject,
+        panel_sequence: int,
+        image_provider_id: str,
+        image_options: ImageGenerationOptions | None = None,
+        *,
+        text_provider_id: str = "",
+    ) -> ComicGenerationResult:
+        """Replace one raw panel and recompose the existing project safely."""
+        working = project.model_copy(deep=True)
+        if working.output_path is None or not working.panel_images:
+            raise ImageModelError("当前项目没有可供单格重生成的原始图片")
+        panel = next(
+            (item for item in working.panels if item.sequence == panel_sequence),
+            None,
+        )
+        if panel is None:
+            raise ImageModelError(f"项目中不存在第 {panel_sequence} 格")
+        record_by_sequence = {
+            item.sequence: item for item in working.panel_images
+        }
+        old_record = record_by_sequence.get(panel_sequence)
+        if old_record is None:
+            raise ImageModelError(f"缺少第 {panel_sequence} 格的原图记录")
+        run_dir = Path(working.output_path).expanduser().resolve().parent
+        target_path = (run_dir / old_record.local_path).resolve()
+        try:
+            target_path.relative_to(run_dir)
+        except ValueError as exc:
+            raise ImageModelError("项目图片路径超出项目输出目录") from exc
+        try:
+            provider = self.image_registry.get(image_provider_id)
+        except KeyError as exc:
+            raise ImageModelError(str(exc)) from exc
+        options = image_options or ImageGenerationOptions()
+        release_status = self._release_text_resources_before_image(
+            text_provider_id,
+            provider,
+        )
+        provider_chain = self._resolve_image_provider_chain(provider, options)
+        base_seed = resolve_system_image_seed(
+            options.seed,
+            provider_supports_seed=provider.get_capabilities().seed,
+        )
+        options = replace(options, seed=base_seed)
+        started = time.perf_counter()
+        with tempfile.TemporaryDirectory(prefix="regenerate_", dir=run_dir) as temp:
+            generated = self._generate_panel_with_chain(
+                working,
+                panel,
+                Path(temp),
+                provider_chain,
+                options,
+            )
+            self._archive_panel_image(
+                working,
+                panel_sequence,
+                target_path,
+                old_record,
+                run_dir,
+                reason="regeneration",
+            )
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(generated.path, target_path)
+        generated.record.local_path = old_record.local_path
+        record_by_sequence[panel_sequence] = generated.record
+        working.panel_images = [
+            record_by_sequence[item.sequence] for item in working.panels
+        ]
+        comic_page, output_path, pdf_path, project_json_path = (
+            self._rerender_saved_panels(working, options, artifact_tag="")
+        )
+        working.output_path = output_path
+        return ComicGenerationResult(
+            project=working,
+            comic_page=comic_page,
+            requested_provider_id="single-panel-regeneration",
+            actual_provider_id="single-panel-regeneration",
+            actual_provider_name="单格重新生成",
+            actual_model_name="existing-project",
+            text_resource_release_attempted=release_status.attempted,
+            text_resource_release_succeeded=release_status.released,
+            text_resource_release_message=release_status.message,
+            text_resource_release_seconds=release_status.elapsed_seconds,
+            requested_image_provider_id=provider.model_id,
+            actual_image_provider_names=(generated.record.provider_name,),
+            actual_image_model_names=(generated.record.model_name,),
+            image_fallback_used=generated.fallback_used,
+            image_fallback_panels=(panel_sequence,) if generated.fallback_used else (),
+            image_error_summaries=(
+                {panel_sequence: generated.error_summary}
+                if generated.error_summary
+                else {}
+            ),
+            panel_image_seconds={panel_sequence: generated.elapsed},
+            total_image_seconds=time.perf_counter() - started,
+            panel_image_paths=tuple(
+                run_dir / item.local_path for item in working.panel_images
+            ),
+            comic_pdf_path=pdf_path,
+            project_json_path=project_json_path,
+        )
+
+    def restore_panel_version(
+        self,
+        project: ComicProject,
+        panel_sequence: int,
+        version: int,
+        image_options: ImageGenerationOptions | None = None,
+    ) -> ComicGenerationResult:
+        """Restore one archived raw-panel version and preserve the current one."""
+        working = project.model_copy(deep=True)
+        if working.output_path is None or not working.panel_images:
+            raise ImageModelError("当前项目没有可回退的已生成分格")
+        archived = next(
+            (
+                item
+                for item in working.panel_image_versions
+                if item.sequence == panel_sequence and item.version == version
+            ),
+            None,
+        )
+        if archived is None:
+            raise ImageModelError(
+                f"第 {panel_sequence} 格不存在历史版本 v{version}"
+            )
+        records = {item.sequence: item for item in working.panel_images}
+        current_record = records.get(panel_sequence)
+        if current_record is None:
+            raise ImageModelError(f"缺少第 {panel_sequence} 格当前原图记录")
+        run_dir = Path(working.output_path).expanduser().resolve().parent
+        current_path = (run_dir / current_record.local_path).resolve()
+        archived_path = (run_dir / archived.local_path).resolve()
+        for candidate in (current_path, archived_path):
+            try:
+                candidate.relative_to(run_dir)
+            except ValueError as exc:
+                raise ImageModelError("项目图片版本路径超出项目输出目录") from exc
+        if not archived_path.is_file():
+            raise ImageModelError(
+                f"历史版本文件不存在：{archived_path.name}"
+            )
+        self._archive_panel_image(
+            working,
+            panel_sequence,
+            current_path,
+            current_record,
+            run_dir,
+            reason=f"before_restore_v{version}",
+        )
+        try:
+            shutil.copy2(archived_path, current_path)
+        except OSError as exc:
+            raise ImageSaveError("恢复历史分格图片失败") from exc
+        restored_record = archived.record.model_copy(deep=True)
+        restored_record.local_path = current_record.local_path
+        records[panel_sequence] = restored_record
+        working.panel_images = [records[item.sequence] for item in working.panels]
+        options = image_options or ImageGenerationOptions()
+        comic_page, output_path, pdf_path, project_json_path = (
+            self._rerender_saved_panels(working, options, artifact_tag="")
+        )
+        return ComicGenerationResult(
+            project=working,
+            comic_page=comic_page,
+            requested_provider_id="panel-version-restore",
+            actual_provider_id="panel-version-restore",
+            actual_provider_name="单格历史版本恢复",
+            actual_model_name="existing-project",
+            requested_image_provider_id=restored_record.provider_id,
+            actual_image_provider_names=(restored_record.provider_name,),
+            actual_image_model_names=(restored_record.model_name,),
+            panel_image_paths=tuple(
+                run_dir / item.local_path for item in working.panel_images
+            ),
+            comic_pdf_path=pdf_path,
+            project_json_path=project_json_path,
+        )
+
+    @staticmethod
+    def _archive_panel_image(
+        project: ComicProject,
+        panel_sequence: int,
+        source_path: Path,
+        record: PanelImageRecord,
+        run_dir: Path,
+        *,
+        reason: str,
+    ) -> PanelImageVersion:
+        if not source_path.is_file():
+            raise ImageModelError(f"缺少第 {panel_sequence} 格当前原图")
+        version = max(
+            (
+                item.version
+                for item in project.panel_image_versions
+                if item.sequence == panel_sequence
+            ),
+            default=0,
+        ) + 1
+        version_dir = run_dir / "panel_versions"
+        version_dir.mkdir(parents=True, exist_ok=True)
+        suffix = source_path.suffix.lower() or ".png"
+        archive_path = version_dir / (
+            f"panel_{panel_sequence:02d}_v{version:03d}{suffix}"
+        )
+        while archive_path.exists():
+            version += 1
+            archive_path = version_dir / (
+                f"panel_{panel_sequence:02d}_v{version:03d}{suffix}"
+            )
+        try:
+            shutil.copy2(source_path, archive_path)
+        except OSError as exc:
+            raise ImageSaveError("保存当前分格历史版本失败") from exc
+        archived_record = record.model_copy(deep=True)
+        relative_path = archive_path.relative_to(run_dir).as_posix()
+        archived_record.local_path = relative_path
+        item = PanelImageVersion(
+            sequence=panel_sequence,
+            version=version,
+            local_path=relative_path,
+            archived_at=datetime.now().isoformat(timespec="seconds"),
+            reason=reason,
+            record=archived_record,
+        )
+        project.panel_image_versions.append(item)
+        return item
 
     def relocalize_rendered_project(
         self,
@@ -734,6 +1062,7 @@ class ComicGenerator:
             script.project,
             image_provider_id,
             image_options,
+            text_provider_id=script.requested_provider_id,
         )
         result.requested_provider_id = script.requested_provider_id
         result.actual_provider_id = script.actual_provider_id
@@ -745,6 +1074,66 @@ class ComicGenerator:
         result.actual_provider_seconds = script.actual_provider_seconds
         result.thinking_control = script.thinking_control
         return result
+
+    def _release_text_resources_before_image(
+        self,
+        text_provider_id: str,
+        image_provider: ImageProvider,
+    ) -> TextModelResourceReleaseStatus:
+        """Best-effort VRAM handoff from a local text model to image generation."""
+        if not self.release_text_model_before_local_image:
+            return TextModelResourceReleaseStatus(
+                attempted=False,
+                released=False,
+                message="已关闭文本模型自动显存释放",
+            )
+        if not image_provider.uses_local_accelerator:
+            return TextModelResourceReleaseStatus(
+                attempted=False,
+                released=False,
+                message="图片 Provider 不使用本机加速器，无需释放文本模型显存",
+            )
+        if not text_provider_id:
+            return TextModelResourceReleaseStatus(
+                attempted=False,
+                released=False,
+                message="未提供文本 Provider，跳过显存释放",
+            )
+        try:
+            text_provider = self.registry.get(text_provider_id)
+        except KeyError:
+            return TextModelResourceReleaseStatus(
+                attempted=False,
+                released=False,
+                message="未找到对应文本 Provider，跳过显存释放",
+            )
+        try:
+            return text_provider.release_resources()
+        except TextModelError as exc:  # pragma: no cover - defensive boundary
+            return TextModelResourceReleaseStatus(
+                attempted=True,
+                released=False,
+                message=f"文本模型资源释放失败：{type(exc).__name__}",
+            )
+
+    @staticmethod
+    def apply_style_selection(
+        project: ComicProject,
+        selected_style: str,
+    ) -> ComicProject:
+        """Synchronize the current UI style with an already-reviewed project."""
+        clean_style = selected_style.strip()
+        if not clean_style:
+            raise ValueError("漫画风格不能为空")
+        updated = project.model_copy(deep=True)
+        if clean_style == updated.style:
+            return updated
+        updated.style = clean_style
+        updated.story_bible.visual_style = clean_style
+        # The previous prompt was authored for the old style. Keeping it would
+        # silently override a newly selected custom style in image generation.
+        updated.story_bible.visual_style_prompt = ""
+        return updated
 
     @staticmethod
     def apply_storyboard_edits(
@@ -767,6 +1156,17 @@ class ComicGenerator:
             panel.visual_description = str(row[1] or "").strip()
             panel.dialogue = str(row[2] or "").strip()
             panel.narration = str(row[3] or "").strip()
+            allowed_positions = {
+                "top_left", "top_center", "top_right", "middle_left",
+                "middle_right", "bottom_left", "bottom_right",
+            }
+            requested_position = (
+                str(row[4] or "").strip() if len(row) >= 5 else ""
+            )
+            if requested_position and requested_position not in allowed_positions:
+                raise ValueError(
+                    f"第 {sequence} 格文字位置无效：{requested_position}"
+                )
             retained = [
                 item
                 for item in panel.text_items
@@ -784,18 +1184,29 @@ class ComicGenerator:
                         speaker=speaker or (template.speaker if template else None),
                         text=text,
                         preferred_position=template.preferred_position
-                        if template
-                        else "top_left",
+                        if template and not requested_position
+                        else requested_position or "top_left",
                         speaker_position=template.speaker_position if template else None,
                         speaker_anchor=template.speaker_anchor if template else None,
                     )
                 )
             if panel.narration:
+                narration_template = next(
+                    (item for item in panel.text_items if item.type == "narration"),
+                    None,
+                )
                 retained.append(
                     ComicTextItem(
                         type="narration",
                         text=panel.narration,
-                        preferred_position="top_right",
+                        preferred_position=(
+                            requested_position
+                            or (
+                                narration_template.preferred_position
+                                if narration_template
+                                else "top_right"
+                            )
+                        ),
                     )
                 )
             panel.text_items = retained
@@ -865,6 +1276,8 @@ class ComicGenerator:
         self,
         project: ComicProject,
         options: ImageGenerationOptions,
+        *,
+        artifact_tag: str | None = None,
     ) -> tuple[Image.Image, Path, Path, Path]:
         if project.output_path is None or not project.panel_images:
             raise ImageModelError(
@@ -920,9 +1333,14 @@ class ComicGenerator:
             panel_specs=project.panels,
             custom_layout=project.custom_layout,
         )
-        tag = project.content_language.replace("-", "_")
-        output_path = run_dir / f"comic_{tag}.png"
-        project_json_path = run_dir / f"project_{tag}.json"
+        tag = (
+            project.content_language.replace("-", "_")
+            if artifact_tag is None
+            else artifact_tag.strip("_ ")
+        )
+        suffix = f"_{tag}" if tag else ""
+        output_path = run_dir / f"comic{suffix}.png"
+        project_json_path = run_dir / f"project{suffix}.json"
         try:
             comic_page.save(output_path, format="PNG")
         except OSError as exc:
@@ -955,6 +1373,14 @@ class ComicGenerator:
         options = options or ImageGenerationOptions(
             concurrency=max(1, _environment_integer("IMAGE_PANEL_CONCURRENCY", 1))
         )
+        if options.reference_images and not options.reference_source:
+            options = replace(
+                options,
+                reference_source="user_upload",
+                reference_character_names=(
+                    (project.characters[0].name,) if project.characters else ()
+                ),
+            )
         project.bubble_theme = options.bubble_theme or project.bubble_theme
         project.lettering_style = options.lettering_style
         project.show_panel_numbers = options.show_panel_numbers
@@ -963,31 +1389,111 @@ class ComicGenerator:
             requested_provider,
             options,
         )
+        base_seed = resolve_system_image_seed(
+            options.seed,
+            provider_supports_seed=requested_provider.get_capabilities().seed,
+        )
+        options = replace(options, seed=base_seed)
         pipeline_started = time.perf_counter()
         completed: dict[int, _PanelPipelineResult] = {}
         failures: dict[int, str] = {}
         concurrency = max(1, min(int(options.concurrency), len(project.panels), 8))
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {
-                executor.submit(
-                    self._generate_panel_with_chain,
+        if requested_provider.uses_local_accelerator:
+            # One local GPU executes ComfyUI jobs serially. Submitting several
+            # panels concurrently only makes their poll deadlines expire while
+            # they wait in ComfyUI's queue.
+            concurrency = 1
+        pending_panels = list(project.panels)
+        if (
+            not options.reference_images
+            and len(project.panels) > 1
+            and requested_provider.auto_reference_from_first_panel
+            and requested_provider.get_capabilities().image_to_image
+        ):
+            reference_panel = next(
+                (panel for panel in project.panels if panel.characters),
+                project.panels[0],
+            )
+            try:
+                reference_result = self._generate_panel_with_chain(
                     project,
-                    panel,
+                    reference_panel,
                     run_dir,
                     provider_chain,
                     options,
-                ): panel.sequence
+                )
+            except ImageModelError as exc:
+                message = self._safe_image_error(exc, requested_provider)
+                raise ImageModelError(
+                    f"自动角色参考格（第 {reference_panel.sequence} 格）生成失败：{message}"
+                ) from exc
+            completed[reference_panel.sequence] = reference_result
+            pending_panels = [
+                panel
                 for panel in project.panels
-            }
-            for future in as_completed(futures):
-                sequence = futures[future]
+                if panel.sequence != reference_panel.sequence
+            ]
+            options = replace(
+                options,
+                reference_images=(reference_result.path,),
+                reference_source="generated_panel",
+                reference_panel_sequence=reference_panel.sequence,
+                reference_character_names=tuple(reference_panel.characters),
+            )
+        def panel_options(panel: PanelSpec) -> ImageGenerationOptions:
+            return (
+                options
+                if self._panel_can_use_reference(panel, requested_provider, options)
+                else replace(
+                    options,
+                    reference_images=(),
+                    reference_source="",
+                    reference_panel_sequence=None,
+                    reference_character_names=(),
+                )
+            )
+
+        if concurrency == 1:
+            # Do not prequeue local-GPU jobs. If ComfyUI keeps executing a job
+            # after our polling deadline, submitting the following panels only
+            # multiplies the visible wait by another timeout period.
+            for panel in pending_panels:
                 try:
-                    completed[sequence] = future.result()
+                    completed[panel.sequence] = self._generate_panel_with_chain(
+                        project,
+                        panel,
+                        run_dir,
+                        provider_chain,
+                        panel_options(panel),
+                    )
                 except ImageModelError as exc:
-                    failures[sequence] = self._safe_image_error(
+                    failures[panel.sequence] = self._safe_image_error(
                         exc,
                         requested_provider,
                     )
+                    break
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = {
+                    executor.submit(
+                        self._generate_panel_with_chain,
+                        project,
+                        panel,
+                        run_dir,
+                        provider_chain,
+                        panel_options(panel),
+                    ): panel.sequence
+                    for panel in pending_panels
+                }
+                for future in as_completed(futures):
+                    sequence = futures[future]
+                    try:
+                        completed[sequence] = future.result()
+                    except ImageModelError as exc:
+                        failures[sequence] = self._safe_image_error(
+                            exc,
+                            requested_provider,
+                        )
         if failures:
             detail = "；".join(
                 f"第 {sequence} 格：{message}"
@@ -1072,6 +1578,22 @@ class ComicGenerator:
             project_json_path=project_json_path,
         )
 
+    @staticmethod
+    def _panel_can_use_reference(
+        panel: PanelSpec,
+        provider: ImageProvider,
+        options: ImageGenerationOptions,
+    ) -> bool:
+        if not options.reference_images:
+            return True
+        if options.reference_character_names and not set(panel.characters).intersection(
+            options.reference_character_names
+        ):
+            return False
+        if not provider.restrict_reference_to_portrait_panels:
+            return True
+        return len(panel.characters) == 1
+
     def _resolve_image_provider_chain(
         self,
         requested_provider: ImageProvider,
@@ -1104,41 +1626,41 @@ class ComicGenerator:
         provider_chain: tuple[ImageProvider, ...],
         options: ImageGenerationOptions,
     ) -> _PanelPipelineResult:
-        base = build_panel_image_request(project, panel)
         requested_seed = normalize_optional_seed(options.seed)
         primary_provider = provider_chain[0]
         if requested_seed is not None and not primary_provider.get_capabilities().seed:
             raise UnsupportedCapabilityError(
                 f"{primary_provider.display_name} 不支持参数：Seed"
             )
-        request = ImageGenerationRequest(
-            prompt=base.prompt,
-            negative_prompt=options.negative_prompt,
-            width=options.width,
-            height=options.height,
-            aspect_ratio=options.aspect_ratio,
-            quality=options.quality,
-            count=1,
-            seed=None,
-            style=project.style,
-            output_format=options.output_format,
-            reference_images=list(options.reference_images),
-            mask_image=options.mask_image,
-            strength=options.strength,
-            model=options.model,
-            panel=panel,
-        )
         panel_path = run_dir / f"panel_{panel.sequence:02d}.png"
         started = time.perf_counter()
         errors: list[str] = []
         generated = None
+        successful_request: ImageGenerationRequest | None = None
         actual_provider = provider_chain[0]
         for index, provider in enumerate(provider_chain):
             actual_provider = provider
+            capabilities = provider.get_capabilities()
+            prompt_profile = provider.get_prompt_profile()
+            prompt_request = build_panel_image_request(
+                project,
+                panel,
+                profile=prompt_profile,
+            )
             panel_seed = (
                 requested_seed + panel.sequence - 1
-                if requested_seed is not None and provider.get_capabilities().seed
+                if requested_seed is not None and capabilities.seed
                 else None
+            )
+            negative_prompt = (
+                build_panel_negative_prompt(
+                    panel,
+                    options.negative_prompt,
+                    profile=prompt_profile,
+                    project=project,
+                )
+                if capabilities.negative_prompt
+                else options.negative_prompt
             )
             width, height, aspect_ratio = self._request_shape(
                 project,
@@ -1146,13 +1668,22 @@ class ComicGenerator:
                 provider,
                 options,
             )
-            attempt_request = request.model_copy(
-                update={
-                    "seed": panel_seed,
-                    "width": width,
-                    "height": height,
-                    "aspect_ratio": aspect_ratio,
-                }
+            attempt_request = ImageGenerationRequest(
+                prompt=prompt_request.prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                aspect_ratio=aspect_ratio,
+                quality=options.quality,
+                count=1,
+                seed=panel_seed,
+                style=project.style,
+                output_format=options.output_format,
+                reference_images=list(options.reference_images),
+                mask_image=options.mask_image,
+                strength=options.strength,
+                model=options.model,
+                panel=panel,
             )
             if provider.model_id == "mock-image" and index > 0:
                 attempt_request = attempt_request.model_copy(
@@ -1175,6 +1706,7 @@ class ComicGenerator:
                     if operation == "edit"
                     else provider.generate(attempt_request, panel_path)
                 )
+                successful_request = attempt_request
                 break
             except ImageModelError as exc:
                 errors.append(
@@ -1183,6 +1715,8 @@ class ComicGenerator:
                 )
         if generated is None:
             raise ImageModelError("；".join(errors))
+        if successful_request is None:
+            raise ImageModelError("图片 Provider 未生成有效请求记录")
         elapsed = time.perf_counter() - started
         path = generated.output_path
         if path is None:
@@ -1192,10 +1726,10 @@ class ComicGenerator:
         bubble_result = prepare_panel_with_bubbles(
             generated.image,
             panel,
-            size=custom_panel_render_size(
-                custom_frame_for_sequence(project.custom_layout, panel.sequence)
-                if project.layout_mode == "custom_page"
-                else None
+            size=self._panel_render_size(
+                project,
+                panel,
+                actual_provider,
             ),
             language=project.content_language,
             bubble_theme=options.bubble_theme or project.bubble_theme,
@@ -1219,7 +1753,7 @@ class ComicGenerator:
                 provider_id=actual_provider.model_id,
                 provider_name=actual_provider.display_name,
                 model_name=generated.model_name,
-                panel_prompt=request.prompt,
+                panel_prompt=successful_request.prompt,
                 local_path=path.relative_to(run_dir).as_posix(),
                 generation_seconds=elapsed,
                 operation=generated.operation,
@@ -1228,6 +1762,16 @@ class ComicGenerator:
                 actual_parameters=generated.actual_parameters or {},
                 fallback_used=fallback_used,
                 error_summary="；".join(errors),
+                reference_source=(
+                    options.reference_source
+                    if successful_request.reference_images
+                    else ""
+                ),
+                reference_panel_sequence=(
+                    options.reference_panel_sequence
+                    if successful_request.reference_images
+                    else None
+                ),
             ),
             fallback_used=fallback_used,
             error_summary="；".join(errors),
@@ -1244,6 +1788,23 @@ class ComicGenerator:
         """Derive generation shape from the selected page/frame layout."""
         if options.width or options.height or options.aspect_ratio:
             return options.width, options.height, options.aspect_ratio
+        target_ratio = panel_target_aspect_ratio(
+            project.layout_mode,
+            project.panels,
+            panel.sequence,
+            project.custom_layout,
+        )
+        preferred_size = provider.preferred_generation_size(target_ratio)
+        if preferred_size is not None:
+            return preferred_size[0], preferred_size[1], ""
+        definition = provider.model_definitions()[0]
+        supported = tuple(definition.supported_sizes)
+        closest_ratio = ComicGenerator._closest_supported_aspect_ratio(
+            supported,
+            target_ratio,
+        )
+        if closest_ratio:
+            return None, None, closest_ratio
         frame = (
             custom_frame_for_sequence(project.custom_layout, panel.sequence)
             if project.layout_mode == "custom_page"
@@ -1256,10 +1817,9 @@ class ComicGenerator:
             "landscape": ("3:2", "4:3"),
             "wide": ("2:1", "3:2", "4:3"),
         }[frame_type]
-        definition = provider.model_definitions()[0]
-        supported = set(definition.supported_sizes)
+        supported_set = set(supported)
         for candidate in candidates:
-            if candidate in supported:
+            if candidate in supported_set:
                 return None, None, candidate
         if provider.get_capabilities().arbitrary_size:
             width, height = {
@@ -1270,6 +1830,53 @@ class ComicGenerator:
             }[frame_type]
             return width, height, ""
         return None, None, ""
+
+    @staticmethod
+    def _closest_supported_aspect_ratio(
+        supported_sizes: tuple[str, ...],
+        target_ratio: float,
+    ) -> str:
+        """Choose the Provider ratio closest to the page cell.
+
+        Pixel dimensions are intentionally ignored here because Providers that
+        advertise named aspect ratios expect those values in their ``size``
+        field.  Providers with arbitrary dimensions use
+        ``preferred_generation_size`` before this method is reached.
+        """
+        candidates: list[tuple[float, str]] = []
+        for value in supported_sizes:
+            if ":" not in value:
+                continue
+            left, right = value.split(":", 1)
+            try:
+                ratio = float(left) / float(right)
+            except (ValueError, ZeroDivisionError):
+                continue
+            candidates.append((abs(math.log(ratio / target_ratio)), value))
+        return min(candidates, default=(0.0, ""))[1]
+
+    @staticmethod
+    def _panel_render_size(
+        project: ComicProject,
+        panel: PanelSpec,
+        provider: ImageProvider,
+    ) -> tuple[int, int]:
+        """Keep lettering canvases aligned with final page-cell ratios."""
+        if project.layout_mode == "custom_page":
+            return custom_panel_render_size(
+                custom_frame_for_sequence(project.custom_layout, panel.sequence)
+            )
+        if project.layout_mode != "adaptive_page":
+            return custom_panel_render_size(None)
+        ratio = panel_target_aspect_ratio(
+            project.layout_mode,
+            project.panels,
+            panel.sequence,
+            project.custom_layout,
+        )
+        if ratio >= 1:
+            return 960, max(240, round(960 / ratio))
+        return max(240, round(720 * ratio)), 720
 
     def _create_run_directory(self, theme: str) -> Path:
         timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")

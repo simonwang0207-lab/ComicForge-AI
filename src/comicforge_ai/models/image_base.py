@@ -252,6 +252,10 @@ class ImageProvider(ABC):
     model_id: str
     display_name: str
     provider_type: str
+    prompt_profile: str = "neutral"
+    uses_local_accelerator: bool = False
+    auto_reference_from_first_panel: bool = False
+    restrict_reference_to_portrait_panels: bool = False
 
     @property
     @abstractmethod
@@ -265,6 +269,17 @@ class ImageProvider(ABC):
     def get_capabilities(self) -> ImageProviderCapabilities:
         """Return supported operations and optional parameters."""
         return ImageProviderCapabilities()
+
+    def get_prompt_profile(self) -> str:
+        """Return the prompt strategy used for this Provider/model family."""
+        return self.prompt_profile
+
+    def preferred_generation_size(
+        self,
+        target_aspect_ratio: float,
+    ) -> tuple[int, int] | None:
+        """Return a Provider-specific safe size or defer to generic sizing."""
+        return None
 
     def model_definitions(self) -> list[ImageModelDefinition]:
         capabilities = self.get_capabilities()

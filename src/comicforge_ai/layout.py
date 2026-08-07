@@ -2,7 +2,7 @@
 
 import math
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from comicforge_ai.bubble_renderer import BubbleRenderResult, render_panel_text
 from comicforge_ai.schemas import (
@@ -203,6 +203,52 @@ def custom_frame_prompt(frame: CustomPanelFrame | None) -> str:
     }[frame.frame_type]
 
 
+def panel_target_aspect_ratio(
+    layout_mode: LayoutMode,
+    panel_specs: list[PanelSpec],
+    sequence: int,
+    custom_layout: list[CustomPanelFrame] | None = None,
+) -> float:
+    """Return the final page-cell ratio assigned to one storyboard panel."""
+    if layout_mode == "custom_page":
+        frame = custom_frame_for_sequence(custom_layout or [], sequence)
+        if frame is not None:
+            return {
+                "square": 1.0,
+                "portrait": 3 / 4,
+                "landscape": 16 / 9,
+                "wide": 2.0,
+            }[frame.frame_type]
+    if layout_mode != "adaptive_page":
+        return 3 / 2
+    panel_index = next(
+        (
+            index
+            for index, panel in enumerate(panel_specs)
+            if panel.sequence == sequence
+        ),
+        max(0, sequence - 1),
+    )
+    page_index, index_on_page = divmod(panel_index, 6)
+    chunk = panel_specs[page_index * 6 : page_index * 6 + 6]
+    if not chunk or index_on_page >= len(chunk):
+        return 3 / 2
+    template = _adaptive_template(
+        len(chunk),
+        [panel.importance for panel in chunk],
+    )
+    _, _, normalized_width, normalized_height = template[index_on_page]
+    page_width = 1536
+    page_height = 1120
+    margin = 32
+    header = 110 if page_index == 0 else 42
+    content_width = page_width - margin * 2
+    content_height = page_height - (header + 16) - margin
+    return (normalized_width * content_width) / (
+        normalized_height * content_height
+    )
+
+
 def _custom_rows(
     frames: list[CustomPanelFrame],
 ) -> list[list[CustomPanelFrame]]:
@@ -353,7 +399,6 @@ def _compose_adaptive_pages(
             fitted = _fit_panel_to_cell(
                 panel,
                 (box_width, box_height),
-                fill_cell=len(chunk) == 4,
             )
             framed = ImageOps.expand(fitted, border=3, fill="#171717")
             page.paste(framed, (left, top))
@@ -415,34 +460,20 @@ def _adaptive_template(
 def _fit_panel_to_cell(
     panel: Image.Image,
     size: tuple[int, int],
-    *,
-    fill_cell: bool,
 ) -> Image.Image:
-    """Fill balanced cells; preserve whole artwork only in irregular templates."""
+    """Fill the assigned comic frame without synthetic letterbox sidebars.
+
+    Comic frames consistently use a cover crop: Provider requests already target
+    the intended frame ratio, and any small residual mismatch is safer to trim
+    than to turn into conspicuous blurred bands in the finished page.
+    """
     source = panel.convert("RGB")
-    if fill_cell:
-        return ImageOps.fit(
-            source,
-            size,
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.5),
-        )
-    background = ImageOps.fit(
+    return ImageOps.fit(
         source,
         size,
         method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
     )
-    background = ImageEnhance.Brightness(background).enhance(0.58)
-    background = background.filter(ImageFilter.GaussianBlur(radius=14))
-    foreground = ImageOps.contain(
-        source,
-        size,
-        method=Image.Resampling.LANCZOS,
-    )
-    x = (size[0] - foreground.width) // 2
-    y = (size[1] - foreground.height) // 2
-    background.paste(foreground, (x, y))
-    return background
 
 
 def _draw_title(

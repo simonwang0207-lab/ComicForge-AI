@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import gradio as gr
@@ -30,6 +31,7 @@ from comicforge_ai.schemas import (
     CustomPanelFrame,
     LayoutMode,
     LetteringStyle,
+    PanelSpec,
 )
 from comicforge_ai.service import (
     ComicGenerationResult,
@@ -102,6 +104,111 @@ def layout_mode_updates(
     }
     return gr.update(visible=custom_active), descriptions[layout_mode]
 
+
+def settings_drawer_updates(section: str) -> tuple[object, ...]:
+    """Show one settings surface at a time inside the side drawer."""
+    sections = ("content", "page", "models", "lettering")
+    titles = {
+        "content": "内容设定",
+        "page": "页面与画框",
+        "models": "模型与生成",
+        "lettering": "文字与排版",
+    }
+    active = section if section in sections else "content"
+    return (
+        *(gr.update(visible=item == active) for item in sections),
+        f"### {titles[active]}",
+    )
+
+
+def workspace_page_updates(page: str) -> tuple[object, object, object]:
+    """Switch the main workspace without nesting every tool on one page."""
+    active = page if page in {"create", "language", "project"} else "create"
+    return tuple(
+        gr.update(visible=item == active)
+        for item in ("create", "language", "project")
+    )  # type: ignore[return-value]
+
+
+def advanced_settings_updates(open_panel: bool) -> object:
+    """Open or close the centered advanced image settings panel."""
+    return gr.update(visible=open_panel)
+
+
+def project_summary_markdown(
+    theme: str,
+    style: str,
+    panel_count: int,
+    layout_mode: LayoutMode,
+    text_provider: str,
+    image_provider: str,
+) -> str:
+    """Build the compact persistent summary shown after settings changes."""
+    layout_labels = {value: label.split("（", 1)[0] for label, value in _LAYOUT_CHOICES}
+    clean_theme = theme.strip() or "未命名漫画"
+    return (
+        '<div class="cf-summary-card">'
+        '<span class="cf-summary-kicker">当前项目</span>'
+        f"<strong>{clean_theme}</strong>"
+        f"<p>{style} · {int(panel_count)} 格 · {layout_labels.get(layout_mode, layout_mode)}</p>"
+        f'<div class="cf-summary-models"><span>文本 {text_provider}</span>'
+        f"<span>图片 {image_provider}</span></div></div>"
+    )
+
+
+def _has_dominant_cjk_text(value: str) -> bool:
+    letters = [char for char in value if char.isalpha()]
+    if not letters:
+        return False
+    cjk = [char for char in letters if "\u4e00" <= char <= "\u9fff"]
+    return len(cjk) / len(letters) >= 0.35
+
+
+def _panel_user_description(panel: PanelSpec) -> str:
+    """Prefer user-facing Chinese storyboard text over image-model English."""
+    visual = (panel.visual_description or "").strip()
+    if _has_dominant_cjk_text(visual):
+        return visual
+    parts = [
+        (panel.scene or "").strip(),
+        (panel.action or "").strip(),
+    ]
+    chinese_parts = [part for part in parts if part and _has_dominant_cjk_text(part)]
+    if chinese_parts:
+        return "；".join(chinese_parts)
+    role = (panel.narrative_role or "").strip()
+    if role and _has_dominant_cjk_text(role):
+        return role
+    return visual
+
+
+def _safe_status_callback(
+    handler: Callable[..., tuple[object, ...]], output_count: int
+) -> Callable[..., tuple[object, ...]]:
+    """Route callback failures to its final, global-notice output."""
+    def wrapped(*args: object) -> tuple[object, ...]:
+        try:
+            return handler(*args)
+        except Exception as exc:  # noqa: BLE001 - final UI error boundary
+            message = str(exc).strip() or "发生未知错误，请检查设置后重试。"
+            return (*([gr.skip()] * (output_count - 1)), f"### 操作未完成\n{message}")
+
+    return wrapped
+
+
+def _safe_side_callback(
+    handler: Callable[..., tuple[object, ...]], output_count: int
+) -> Callable[..., tuple[object, ...]]:
+    """Preserve side-panel state and append one global notice on failure."""
+    def wrapped(*args: object) -> tuple[object, ...]:
+        try:
+            return (*handler(*args), gr.skip())
+        except Exception as exc:  # noqa: BLE001 - final UI error boundary
+            message = str(exc).strip() or "发生未知错误，请检查设置后重试。"
+            return (*([gr.skip()] * output_count), f"### 操作未完成\n{message}")
+
+    return wrapped
+
 _APP_THEME = gr.themes.Soft(
     primary_hue="violet",
     secondary_hue="cyan",
@@ -116,14 +223,18 @@ _APP_CSS = """
   min-height: 100vh;
 }
 .cf-topbar {
+  align-items: center !important;
   border: 1px solid #e5e9f2 !important;
-  border-radius: 16px !important;
+  border-radius: 8px !important;
   padding: 12px 18px !important;
   margin-bottom: 12px !important;
   background: #ffffff !important;
   box-shadow: 0 8px 24px rgba(35, 42, 68, 0.06);
 }
-.cf-topbar h1 { margin: 0 !important; letter-spacing: -.035em; font-size: 25px !important; }
+.cf-topbar .form,
+.cf-topbar .block,
+.cf-topbar .html-container { border:0 !important; background:transparent !important; box-shadow:none !important; }
+.cf-topbar h1 { margin: 0 !important; letter-spacing: 0; font-size: 22px !important; }
 .cf-topbar p { margin: 2px 0 0 !important; color: #6d6a83; font-size: 12px; }
 .cf-hero {
   border: 1px solid rgba(121, 104, 255, 0.24);
@@ -141,6 +252,126 @@ _APP_CSS = """
   border-right: 1px solid #e2e6ef !important;
   box-shadow: 10px 0 28px rgba(35, 42, 68, .06);
 }
+.cf-summary-card {
+  padding: 16px;
+  margin: 4px 0 12px;
+  border: 1px solid rgba(92, 73, 210, .16);
+  border-radius: 18px;
+  background: linear-gradient(145deg, #fff, #f3f0ff);
+  box-shadow: 0 12px 28px rgba(53, 44, 112, .08);
+}
+.cf-summary-card .cf-summary-kicker { display:block; color:#776fa3; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.12em; }
+.cf-summary-card strong { display:block; margin-top:5px; color:#20233a; font-size:17px; }
+.cf-summary-card p { margin:5px 0 10px; color:#66647b; font-size:12px; }
+.cf-summary-models { display:flex; flex-wrap:wrap; gap:6px; }
+.cf-summary-models span { padding:4px 8px; border-radius:99px; background:#ebe8ff; color:#5549a7; font-size:11px; }
+.cf-nav-grid { gap:8px !important; margin-bottom:10px; }
+.cf-nav-button button { justify-content:flex-start !important; border:1px solid #e4e1f2 !important; background:#fff !important; color:#403c58 !important; box-shadow:0 4px 12px rgba(40,35,75,.04) !important; }
+.cf-nav-button button:hover { border-color:#8170e9 !important; transform:translateY(-1px); }
+.cf-drawer-panel { padding:14px !important; border:1px solid #e4e6ef !important; border-radius:18px !important; background:#fff !important; box-shadow:0 12px 30px rgba(40,35,75,.07); }
+.cf-drawer-title h3 { margin:2px 0 10px !important; font-size:18px; }
+.cf-global-notice { position:sticky; top:8px; z-index:12; padding:12px 16px !important; border:1px solid #dcd7ff !important; border-radius:15px !important; background:linear-gradient(90deg,#f1efff,#eefaff) !important; box-shadow:0 10px 26px rgba(50,42,105,.1); }
+.cf-image-settings-trigger { align-self:center; }
+.cf-image-settings-trigger button {
+  min-height:40px !important;
+  padding:0 16px !important;
+  border:1px solid rgba(85, 76, 190, .34) !important;
+  border-radius:14px !important;
+  color:#302867 !important;
+  font-weight:750 !important;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.92) 0 38%, rgba(224,239,255,.88) 39% 100%) !important;
+  box-shadow:
+    0 8px 18px rgba(55, 75, 140, .18),
+    inset 0 1px 0 rgba(255,255,255,1),
+    inset 0 -2px 4px rgba(88, 103, 193, .13) !important;
+}
+.cf-image-settings-trigger button:hover {
+  transform:translateY(-2px) scale(1.02);
+  box-shadow:
+    0 12px 24px rgba(55, 75, 140, .24),
+    inset 0 1px 0 rgba(255,255,255,1),
+    inset 0 -2px 5px rgba(88, 103, 193, .16) !important;
+}
+.cf-advanced-settings {
+  position: fixed !important;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(760px, calc(100vw - 40px));
+  max-height: min(78vh, 760px);
+  overflow-y: auto;
+  z-index: 1000;
+  border: 1px solid #dfe5ef !important;
+  border-radius: 8px !important;
+  padding: 16px !important;
+  margin: 0 !important;
+  background: #ffffff !important;
+  box-shadow:
+    0 18px 50px rgba(24, 31, 54, .25),
+    0 0 0 100vmax rgba(22, 27, 42, .42);
+}
+.cf-advanced-settings .form,
+.cf-advanced-settings .block,
+.cf-advanced-settings .wrap,
+.cf-advanced-settings .prose { background: #ffffff !important; }
+.cf-advanced-head {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:10px;
+}
+.cf-advanced-head h3 { margin:0 !important; font-size:16px !important; letter-spacing:0; }
+.cf-advanced-head p { margin:2px 0 0; color:#657085; font-size:12px; }
+.cf-modal-close {
+  position:absolute !important;
+  top:12px;
+  right:12px;
+  z-index:3;
+  width:36px !important;
+  min-width:36px !important;
+}
+.cf-modal-close button {
+  width:36px !important;
+  min-width:36px !important;
+  height:36px !important;
+  padding:0 !important;
+  border:1px solid #dde2eb !important;
+  border-radius:50% !important;
+  color:#3c4658 !important;
+  background:#f7f9fc !important;
+  box-shadow:0 4px 10px rgba(30, 38, 56, .1) !important;
+  font-size:22px !important;
+  line-height:1 !important;
+}
+.cf-modal-close button:hover {
+  color:#111827 !important;
+  background:#ffffff !important;
+  transform:scale(1.06);
+}
+.cf-advanced-section {
+  border-top: 1px solid #edf0f5;
+  padding-top: 12px !important;
+  margin-top: 12px !important;
+}
+.cf-setting-choice .wrap { gap:8px !important; }
+.cf-setting-choice label:has(input) {
+  padding:8px 10px !important;
+  border:1px solid #e0e5ed !important;
+  border-radius:8px !important;
+  background:#f8fafc !important;
+}
+.cf-setting-choice label:has(input:checked) {
+  border-color:#7b70d6 !important;
+  background:#f0efff !important;
+}
+.cf-action-primary button { min-height:48px; border:0 !important; background:linear-gradient(120deg,#6f52ed,#4a9fe8) !important; color:#fff !important; font-weight:700 !important; box-shadow:0 10px 24px rgba(89,72,210,.24) !important; }
+.cf-action-secondary button { border:1px solid #cfc8f7 !important; background:#f7f5ff !important; color:#584aa8 !important; }
+.cf-action-quiet button { border-color:transparent !important; background:transparent !important; color:#615d73 !important; box-shadow:none !important; }
+.cf-action-danger button { border:1px solid #ffd4d8 !important; background:#fff4f5 !important; color:#b72f3a !important; }
+.cf-page-nav { padding:6px !important; border:1px solid #e4e7ef !important; border-radius:16px !important; background:#fff !important; }
+.cf-page-nav button { border:0 !important; box-shadow:none !important; }
 .cf-sidebar-shell ::-webkit-scrollbar { width: 8px; }
 .cf-sidebar-shell ::-webkit-scrollbar-thumb {
   border-radius: 99px;
@@ -191,12 +422,14 @@ _APP_CSS = """
   box-shadow: 0 12px 30px rgba(91, 76, 176, .11), inset 0 1px 0 rgba(255,255,255,.95);
 }
 .cf-mini-status {
-  max-height: 150px;
-  overflow: auto;
-  border-radius: 14px;
-  padding: 9px 11px !important;
-  background: linear-gradient(120deg, rgba(236,232,255,.75), rgba(230,249,255,.74));
-  font-size: 13px;
+  border-radius: 8px;
+  padding: 10px 12px !important;
+  background: #f4f7fb;
+  border: 1px solid #e3e7ef;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow: visible;
+  word-break: break-word;
 }
 .cf-main-column {
   padding: 12px 18px;
@@ -318,12 +551,12 @@ _APP_CSS = """
 }
 .cf-status {
   border-left: 4px solid #7867f8;
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 10px 14px !important;
   background: rgba(255,255,255,.76);
   margin-bottom: 10px !important;
-  max-height: 170px;
-  overflow: auto;
+  overflow: visible;
+  word-break: break-word;
 }
 .gradio-container button.primary {
   border: 0 !important;
@@ -370,7 +603,6 @@ _APP_CSS = """
 .cf-canvas-shell > div,
 .cf-canvas-shell > div > div,
 .cf-canvas-shell > .gap,
-.cf-canvas-shell div:has(#cf-preview-mode),
 .cf-canvas-shell div:has(#comic-preview),
 .cf-canvas-shell div:has(#cf-preview-help) {
   --block-background-fill: #ffffff;
@@ -396,18 +628,22 @@ _APP_CSS = """
   background: #ffffff !important;
   box-shadow: none !important;
 }
-#cf-preview-mode,
-#cf-preview-mode > div,
-#cf-preview-mode .wrap,
-#cf-preview-mode fieldset,
 #cf-preview-help,
 #cf-preview-help > div,
 #cf-preview-help .prose {
   background: #ffffff !important;
   box-shadow: none !important;
 }
-.cf-preview-mode { max-width: 380px; }
-.cf-preview-mode .wrap { gap: 5px !important; }
+.cf-preview-controls {
+  align-items: center !important;
+  gap: 10px !important;
+  background: #ffffff !important;
+}
+#cf-fullscreen-button {
+  width: auto !important;
+  min-width: 132px !important;
+  margin-left: auto !important;
+}
 .cf-preview-help {
   margin: 6px 8px 0 !important;
   color: #77748d;
@@ -438,21 +674,51 @@ _APP_CSS = """
   object-fit: contain !important;
   object-position: top center !important;
 }
-#comic-preview.cf-preview-width .image-container,
-#comic-preview.cf-preview-width .wrap,
-#comic-preview.cf-preview-width [data-testid="image"] {
-  overflow-y: auto !important;
-  align-items: flex-start !important;
-}
-#comic-preview.cf-preview-width img {
-  width: 100% !important;
-  height: auto !important;
-  max-height: none !important;
-  object-fit: contain !important;
-}
 #comic-preview.cf-preview-fit .image-container,
 #comic-preview.cf-preview-fit .wrap {
   overflow: hidden !important;
+}
+.cf-canvas-shell:fullscreen {
+  box-sizing: border-box;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: none !important;
+  padding: 18px !important;
+  overflow: hidden !important;
+  border-radius: 0 !important;
+  background: #ffffff !important;
+}
+.cf-canvas-shell:fullscreen #comic-preview {
+  height: calc(100vh - 150px) !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: hidden !important;
+  user-select: none !important;
+  touch-action: none !important;
+}
+.cf-canvas-shell:fullscreen #comic-preview .image-container,
+.cf-canvas-shell:fullscreen #comic-preview .wrap,
+.cf-canvas-shell:fullscreen #comic-preview [data-testid="image"],
+.cf-canvas-shell:fullscreen #comic-preview > div,
+.cf-canvas-shell:fullscreen #comic-preview > div > div {
+  height: 100% !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+  align-items: center !important;
+}
+.cf-canvas-shell:fullscreen #comic-preview img {
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  object-fit: contain !important;
+  object-position: center center !important;
+  transform-origin: 0 0 !important;
+  cursor: grab !important;
+  will-change: transform;
+}
+.cf-canvas-shell:fullscreen #comic-preview.cf-pan-active img {
+  cursor: grabbing !important;
 }
 @media (max-width: 900px) {
   .cf-sidebar-shell { width: min(92vw, 480px) !important; }
@@ -461,7 +727,6 @@ _APP_CSS = """
   .cf-main-column { padding: 8px; border-radius: 18px; }
   .cf-first-run { grid-template-columns: 1fr; }
   .cf-canvas-toolbar { position: static; }
-  .cf-preview-mode { max-width: none; }
   #comic-preview { height: 62vh; min-height: 390px; }
 }
 """
@@ -692,6 +957,10 @@ def _project_markdown(project: ComicProject) -> str:
         f"- 第 {item.round} 轮：{item.instruction}"
         for item in project.revision_history
     )
+    panel_versions = "\n".join(
+        f"- 第 {item.sequence} 格 · v{item.version} · {item.archived_at}"
+        for item in project.panel_image_versions
+    )
     return (
         f"### {project.title}\n\n"
         f"**候选标题：** {candidates}\n\n"
@@ -700,6 +969,7 @@ def _project_markdown(project: ComicProject) -> str:
         f"{custom_layout_note}\n\n"
         f"**故事梗概：** {project.story}{guidance}\n\n"
         f"#### 连续修订记录\n{revision_history or '尚无人工追加修订。'}\n\n"
+        f"#### 单格图片历史\n{panel_versions or '尚无历史版本。'}\n\n"
         f"#### 角色\n{characters}\n\n"
         f"#### 分镜\n{panels}"
     )
@@ -776,6 +1046,10 @@ def _generation_status_markdown(result: ComicGenerationResult) -> str:
         f"实际 Provider：`{result.actual_provider_name}`  \n"
         f"实际模型：`{result.actual_model_name}`"
     )
+    review_not_applied = (
+        not result.project.script_reviewed
+        and result.fallback_reason.startswith("审查未应用：")
+    )
     if result.fallback_used:
         text_status = (
             "### ⚠️ 已回退到 MockTextModel\n\n"
@@ -784,6 +1058,14 @@ def _generation_status_markdown(result: ComicGenerationResult) -> str:
             f"失败原因：{result.fallback_reason}  \n"
             f"{provenance}  \n"
             f"Mock 回退耗时：`{result.actual_provider_seconds:.2f} 秒`"
+        )
+    elif review_not_applied:
+        text_status = (
+            "### ⚠️ 文本初稿生成成功，审查结果未应用\n\n"
+            f"{provenance}  \n"
+            f"总耗时：`{result.actual_provider_seconds:.2f} 秒`  \n"
+            f"审查失败原因：{result.fallback_reason.removeprefix('审查未应用：')}  \n"
+            "未发生文本 Mock 回退，已保留通过校验的真实模型初稿。"
         )
     else:
         thinking = (
@@ -831,8 +1113,17 @@ def _generation_status_markdown(result: ComicGenerationResult) -> str:
         image_heading = "### ✅ 图片生成完成，未发生 Mock 回退"
         error_lines = "无"
         advice = "无须处理。"
+    if result.text_resource_release_attempted:
+        release_icon = "✅" if result.text_resource_release_succeeded else "⚠️"
+        release_text = (
+            f"{release_icon} {result.text_resource_release_message}"
+            f"（{result.text_resource_release_seconds:.2f} 秒）"
+        )
+    else:
+        release_text = "未触发本机文本模型显存释放"
     image_status = (
         f"{image_heading}\n\n"
+        f"显存交接：{release_text}  \n"
         f"请求图片 Provider：`{result.requested_image_provider_id}`  \n"
         f"实际图片 Provider：`{image_providers}`  \n"
         f"实际图片模型：`{image_models}`  \n"
@@ -881,8 +1172,13 @@ def _script_status_markdown(result: ScriptGenerationResult) -> str:
         else "  \n未发生文本 Mock 回退。"
     )
     notes = "  \n".join(f"- {note}" for note in result.project.review_notes)
+    heading = (
+        "### ✅ 剧本初稿、审查与修订已完成"
+        if result.project.script_reviewed
+        else "### ⚠️ 初稿已生成，审查结果未应用"
+    )
     return (
-        "### ✅ 剧本初稿、审查与修订已完成\n\n"
+        heading + "\n\n"
         f"实际 Provider：`{result.actual_provider_name}`  \n"
         f"实际模型：`{result.actual_model_name}`  \n"
         f"内容语言：`{result.project.content_language}`  \n"
@@ -896,9 +1192,17 @@ def _storyboard_rows(project: ComicProject) -> list[list[object]]:
     return [
         [
             panel.sequence,
-            panel.visual_description,
+            _panel_user_description(panel),
             panel.dialogue,
             panel.narration,
+            next(
+                (
+                    item.preferred_position
+                    for item in panel.text_items
+                    if item.type in {"speech", "thought", "narration"}
+                ),
+                "",
+            ),
         ]
         for panel in project.panels
     ]
@@ -910,6 +1214,7 @@ def generate_script_for_ui(
     style: str,
     panel_count: int,
     provider_id: str,
+    review_provider_id: str,
     language: ContentLanguage,
     layout_mode: LayoutMode,
     allow_multi_shot_panels: bool,
@@ -926,14 +1231,15 @@ def generate_script_for_ui(
             "adaptive_page" if layout_mode == "custom_page" else layout_mode
         )
         result = service.generate_script_with_status(
-            theme,
-            style,
-            int(panel_count),
-            provider_id,
-            language,
-            provider_layout,
-            allow_multi_shot_panels,
-            source_story,
+            theme=theme,
+            style=style,
+            panel_count=int(panel_count),
+            provider_id=provider_id,
+            language=language,
+            layout_mode=provider_layout,
+            allow_multi_shot_panels=allow_multi_shot_panels,
+            source_story=source_story,
+            review_provider_id=review_provider_id,
         )
         result.project.layout_mode = layout_mode
         result.project.custom_layout = custom_frames if layout_mode == "custom_page" else []
@@ -996,9 +1302,11 @@ def render_confirmed_for_ui(
     project_state: dict[str, object] | None,
     storyboard_rows: list[list[object]],
     final_title: str,
+    selected_style: str,
     layout_mode: LayoutMode,
     allow_multi_shot_panels: bool,
     custom_layout_state: list[dict[str, object]] | None,
+    text_provider_id: str,
     image_provider_id: str,
     image_model: str,
     negative_prompt: str,
@@ -1027,6 +1335,7 @@ def render_confirmed_for_ui(
     try:
         project = ComicProject.model_validate(project_state)
         project = service.apply_storyboard_edits(project, storyboard_rows)
+        project = service.apply_style_selection(project, selected_style)
         if not final_title.strip():
             raise ValueError("最终漫画标题不能为空")
         project.title = final_title.strip()
@@ -1064,6 +1373,7 @@ def render_confirmed_for_ui(
                 show_panel_numbers=show_panel_numbers,
                 auto_shorten_dialogue=auto_shorten_dialogue,
             ),
+            text_provider_id=text_provider_id,
         )
     except (ValueError, TextModelError, ImageModelError) as exc:
         raise gr.Error(str(exc)) from exc
@@ -1075,6 +1385,134 @@ def render_confirmed_for_ui(
         str(result.comic_pdf_path),
         str(result.project_json_path),
         _generation_status_markdown(result),
+    )
+
+
+def regenerate_panel_for_ui(
+    project_state: dict[str, object] | None,
+    storyboard_rows: list[list[object]],
+    panel_sequence: float,
+    text_provider_id: str,
+    image_provider_id: str,
+    image_model: str,
+    negative_prompt: str,
+    quality: str,
+    seed: float | None,
+    output_format: str,
+    reference_images: list[str] | None,
+    mask_image: str | None,
+    strict_mode: bool,
+    secondary_provider_id: str,
+    bubble_theme: str,
+    lettering_style: LetteringStyle,
+    show_narration: bool,
+    show_panel_numbers: bool,
+    auto_shorten_dialogue: bool,
+    generator: ComicGenerator | None = None,
+) -> tuple[dict[str, object], object, str, str, str, str, str]:
+    """Regenerate one selected raw panel and preserve all other panel images."""
+    if not project_state:
+        raise gr.Error("请先生成或加载一个已有漫画项目")
+    service = generator or ComicGenerator()
+    try:
+        project = ComicProject.model_validate(project_state)
+        project = service.apply_storyboard_edits(project, storyboard_rows)
+        sequence = int(panel_sequence)
+        result = service.regenerate_panel(
+            project,
+            sequence,
+            image_provider_id,
+            ImageGenerationOptions(
+                model=image_model,
+                negative_prompt=(negative_prompt or "").strip(),
+                quality=quality or "auto",
+                seed=normalize_optional_seed(seed),
+                output_format=output_format or "png",
+                reference_images=tuple(Path(item) for item in (reference_images or [])),
+                mask_image=Path(mask_image) if mask_image else None,
+                strict_mode=bool(strict_mode),
+                fallback_chain=(secondary_provider_id,) if secondary_provider_id else (),
+                concurrency=1,
+                bubble_theme=bubble_theme,
+                lettering_style=lettering_style,
+                show_narration=show_narration,
+                show_panel_numbers=show_panel_numbers,
+                auto_shorten_dialogue=auto_shorten_dialogue,
+            ),
+            text_provider_id=text_provider_id,
+        )
+    except (ValueError, TextModelError, ImageModelError) as exc:
+        raise gr.Error(str(exc)) from exc
+    archived_version = max(
+        (
+            item.version
+            for item in result.project.panel_image_versions
+            if item.sequence == sequence and item.reason == "regeneration"
+        ),
+        default=1,
+    )
+    return (
+        result.project.model_dump(mode="json"),
+        result.comic_page,
+        _project_markdown(result.project),
+        str(result.project.output_path),
+        str(result.comic_pdf_path),
+        str(result.project_json_path),
+        f"第 {sequence} 格已重新生成；原图已保存为历史版本 v{archived_version}，"
+        "其余分格原图保持不变。\n\n"
+        + _generation_status_markdown(result),
+    )
+
+
+def restore_panel_version_for_ui(
+    project_state: dict[str, object] | None,
+    storyboard_rows: list[list[object]],
+    panel_sequence: float,
+    version: float,
+    bubble_theme: str,
+    lettering_style: LetteringStyle,
+    show_narration: bool,
+    show_panel_numbers: bool,
+    auto_shorten_dialogue: bool,
+    generator: ComicGenerator | None = None,
+) -> tuple[dict[str, object], object, str, str, str, str, str]:
+    """Restore one archived panel version and recompose the comic."""
+    if not project_state:
+        raise gr.Error("请先生成或加载一个已有漫画项目")
+    service = generator or ComicGenerator()
+    try:
+        project = ComicProject.model_validate(project_state)
+        project = service.apply_storyboard_edits(project, storyboard_rows)
+        sequence = int(panel_sequence)
+        selected_version = int(version)
+        result = service.restore_panel_version(
+            project,
+            sequence,
+            selected_version,
+            ImageGenerationOptions(
+                bubble_theme=bubble_theme,
+                lettering_style=lettering_style,
+                show_narration=show_narration,
+                show_panel_numbers=show_panel_numbers,
+                auto_shorten_dialogue=auto_shorten_dialogue,
+            ),
+        )
+    except (ValueError, TextModelError, ImageModelError) as exc:
+        raise gr.Error(str(exc)) from exc
+    versions = sorted(
+        item.version
+        for item in result.project.panel_image_versions
+        if item.sequence == sequence
+    )
+    return (
+        result.project.model_dump(mode="json"),
+        result.comic_page,
+        _project_markdown(result.project),
+        str(result.project.output_path),
+        str(result.comic_pdf_path),
+        str(result.project_json_path),
+        f"第 {sequence} 格已恢复到 v{selected_version}。恢复前的当前图片也已归档，"
+        f"现有版本：{', '.join(f'v{item}' for item in versions)}。",
     )
 
 
@@ -1277,6 +1715,7 @@ def load_project_for_ui(
         _project_markdown(project),
         _storyboard_rows(project),
         project.content_language,
+        project.style,
         project.user_story_guidance,
         project.title,
         project.layout_mode,
@@ -1387,6 +1826,24 @@ def create_demo(
     """Build and return the Chinese Gradio interface."""
     active_registry = registry or build_default_registry()
     active_image_registry = image_registry or build_default_image_registry()
+    text_choices = active_registry.configured_choices()
+    image_choices = active_image_registry.configured_provider_choices()
+    if not text_choices or not image_choices:
+        raise RuntimeError("至少需要配置一个文本 Provider 和一个图片 Provider")
+    default_text_provider = next(
+        (value for _, value in text_choices if value == "mock"), text_choices[0][1]
+    )
+    default_image_provider = next(
+        (value for _, value in image_choices if value == "mock-image"),
+        image_choices[0][1],
+    )
+    initial_image_definition = active_image_registry.model_definitions(
+        default_image_provider
+    )[0]
+    fallback_image_choices = [
+        (active_image_registry.get(provider_id).display_name, provider_id)
+        for _, provider_id in image_choices
+    ]
     service = generator or ComicGenerator(
         registry=active_registry,
         image_registry=active_image_registry,
@@ -1444,6 +1901,7 @@ def create_demo(
         style: str,
         panel_count: int,
         provider_id: str,
+        review_provider_id: str,
         language: ContentLanguage,
         layout_mode: LayoutMode,
         allow_multi_shot_panels: bool,
@@ -1455,6 +1913,7 @@ def create_demo(
             style,
             panel_count,
             provider_id,
+            review_provider_id,
             language,
             layout_mode,
             allow_multi_shot_panels,
@@ -1480,9 +1939,11 @@ def create_demo(
         project_state: dict[str, object] | None,
         storyboard_rows: list[list[object]],
         final_title: str,
+        selected_style: str,
         layout_mode: LayoutMode,
         allow_multi_shot_panels: bool,
         custom_layout_state: list[dict[str, object]] | None,
+        text_provider_id: str,
         image_provider_id: str,
         image_model: str,
         negative_prompt: str,
@@ -1507,9 +1968,11 @@ def create_demo(
             project_state,
             storyboard_rows,
             final_title,
+            selected_style,
             layout_mode,
             allow_multi_shot_panels,
             custom_layout_state,
+            text_provider_id,
             image_provider_id,
             image_model,
             negative_prompt,
@@ -1531,6 +1994,12 @@ def create_demo(
             auto_shorten_dialogue,
             service,
         )
+
+    def handle_panel_regeneration(*args: object) -> tuple[object, ...]:
+        return regenerate_panel_for_ui(*args, generator=service)  # type: ignore[arg-type]
+
+    def handle_panel_restore(*args: object) -> tuple[object, ...]:
+        return restore_panel_version_for_ui(*args, generator=service)  # type: ignore[arg-type]
 
     def handle_relocalization(
         project_state: dict[str, object] | None,
@@ -1571,16 +2040,8 @@ def create_demo(
             gr.update(choices=choices, value=definition.model_id),
             _image_model_status_markdown(service.check_image_provider(provider_id)),
             _capabilities_markdown(active_image_registry, provider_id),
-            gr.update(
-                visible=capabilities.negative_prompt,
-                interactive=capabilities.negative_prompt,
-                value="" if not capabilities.negative_prompt else None,
-            ),
-            (
-                gr.update(visible=True, interactive=True)
-                if capabilities.seed
-                else gr.update(visible=False, interactive=False, value=None)
-            ),
+            gr.update(visible=False, interactive=False, value=""),
+            gr.update(visible=False, interactive=False, value=None),
             gr.update(
                 visible=bool(
                     capabilities.image_to_image or capabilities.multi_reference
@@ -1628,15 +2089,25 @@ def create_demo(
         script_state = gr.State(value=None)
         custom_layout_state = gr.State(value=[])
         custom_selected_index = gr.State(value=None)
-        gr.HTML(
-            """
-            <header class="cf-topbar">
-              <h1>🎨 ComicForge AI</h1>
-              <p>剧本 · 分镜 · 漫画</p>
-            </header>
-            """,
-            padding=False,
-        )
+        with gr.Row(elem_classes="cf-topbar"):
+            with gr.Column(scale=1, min_width=240):
+                gr.HTML(
+                    """
+                    <header class="cf-topbar-brand">
+                      <h1>ComicForge AI</h1>
+                      <p>剧本 · 分镜 · 漫画</p>
+                    </header>
+                    """,
+                    padding=False,
+                )
+            advanced_settings_button = gr.Button(
+                "图片设置",
+                size="sm",
+                elem_id="cf-open-advanced-settings",
+                elem_classes="cf-image-settings-trigger",
+                min_width=128,
+                scale=0,
+            )
         with gr.Row():
             with gr.Sidebar(
                 label="🚀 创作控制台",
@@ -1644,11 +2115,37 @@ def create_demo(
                 width=420,
                 elem_classes="cf-sidebar-shell",
             ):
-                with gr.Accordion(
-                    "01 · 内容",
-                    open=True,
-                    elem_classes="cf-step-section",
-                ):
+                project_summary = gr.HTML(
+                    project_summary_markdown(
+                        "一只猫第一次坐地铁",
+                        "清新治愈",
+                        4,
+                        "adaptive_page",
+                        default_text_provider,
+                        default_image_provider,
+                    ),
+                    elem_id="cf-project-summary",
+                )
+                with gr.Row(elem_classes="cf-nav-grid"):
+                    content_settings_button = gr.Button(
+                        "✦ 内容", elem_id="cf-open-content", elem_classes="cf-nav-button", size="sm"
+                    )
+                    page_settings_button = gr.Button(
+                        "▤ 页面", elem_id="cf-open-page", elem_classes="cf-nav-button", size="sm"
+                    )
+                with gr.Row(elem_classes="cf-nav-grid"):
+                    model_settings_button = gr.Button(
+                        "◈ 模型", elem_id="cf-open-models", elem_classes="cf-nav-button", size="sm"
+                    )
+                    lettering_settings_button = gr.Button(
+                        "◌ 排字", elem_id="cf-open-lettering", elem_classes="cf-nav-button", size="sm"
+                    )
+                drawer_title = gr.Markdown(
+                    "### 内容设定", elem_classes="cf-drawer-title"
+                )
+                with gr.Group(
+                    visible=True, elem_id="cf-settings-content", elem_classes="cf-drawer-panel"
+                ) as content_settings_panel:
                     theme = gr.Textbox(
                         label="✦ 漫画主题或暂定名称",
                         placeholder="例如：一只猫第一次坐地铁",
@@ -1689,11 +2186,9 @@ def create_demo(
                         precision=0,
                         label="▦ 分镜数量（1–20）",
                     )
-                with gr.Accordion(
-                    "02 · 页面",
-                    open=False,
-                    elem_classes="cf-step-section",
-                ):
+                with gr.Group(
+                    visible=False, elem_id="cf-settings-page", elem_classes="cf-drawer-panel"
+                ) as page_settings_panel:
                     layout_mode = gr.Dropdown(
                         label="▤ 页面形式",
                         choices=_LAYOUT_CHOICES,
@@ -1723,14 +2218,18 @@ def create_demo(
                         with gr.Row():
                             replace_custom_frame_button = gr.Button(
                                 "↺ 更改选中类型",
-                                variant="primary",
+                                elem_classes="cf-action-secondary",
                             )
                             insert_custom_frame_button = gr.Button(
                                 "＋ 在选中后补入",
+                                elem_classes="cf-action-secondary",
                             )
-                            delete_custom_frame_button = gr.Button("⌫ 删除选中")
+                            delete_custom_frame_button = gr.Button(
+                                "⌫ 删除选中", elem_classes="cf-action-danger"
+                            )
                         reset_custom_layout_button = gr.Button(
-                            "恢复适合当前分镜数的默认画框"
+                            "恢复适合当前分镜数的默认画框",
+                            elem_classes="cf-action-quiet",
                         )
                         custom_layout_table = gr.Dataframe(
                             headers=["序号", "画框类型"],
@@ -1752,44 +2251,101 @@ def create_demo(
                             "选择自定义画框布局后，将按当前分镜数自动初始化。"
                         )
 
-                with gr.Accordion(
-                    "03 · 文本模型",
-                    open=False,
-                    elem_classes="cf-step-section",
-                ):
+                with gr.Group(
+                    visible=False, elem_id="cf-settings-models", elem_classes="cf-drawer-panel"
+                ) as model_settings_panel:
                     provider = gr.Dropdown(
                         label="🧠 文本模型",
-                        choices=active_registry.choices(),
-                        value="mock",
+                        choices=text_choices,
+                        value=default_text_provider,
                     )
-                    check_button = gr.Button("↻ 检测文本模型")
+                    review_provider = gr.Dropdown(
+                        label="🔎 剧本审查模型",
+                        choices=text_choices,
+                        value=default_text_provider,
+                        info="可与创作模型不同；审查模型负责事实、因果和分镜完整性修订。",
+                    )
+                    check_button = gr.Button(
+                        "↻ 检测文本模型", elem_classes="cf-action-secondary"
+                    )
                     model_status = gr.Markdown(
-                        _model_status_markdown(service.check_provider("mock")),
-                        elem_classes="cf-mini-status",
-                    )
-
-                with gr.Accordion(
-                    "04 · 图片与排字",
-                    open=False,
-                    elem_classes="cf-step-section",
-                ):
-                    image_provider = gr.Dropdown(
-                        label="◈ 图片模型与服务",
-                        choices=active_image_registry.choices(),
-                        value="mock-image",
-                    )
-                    check_image_button = gr.Button("↻ 检测图片模型")
-                    image_model_status = gr.Markdown(
-                        _image_model_status_markdown(
-                            service.check_image_provider("mock-image")
+                        _model_status_markdown(
+                            service.check_provider(default_text_provider)
                         ),
                         elem_classes="cf-mini-status",
                     )
-                    initial_image_definition = (
-                        active_image_registry.model_definitions("mock-image")[0]
+                    gr.Markdown("#### 图片模型")
+                    image_provider = gr.Dropdown(
+                        label="◈ 图片模型与服务",
+                        choices=image_choices,
+                        value=default_image_provider,
                     )
-                    with gr.Accordion("⚙ 专业设置（通常无需修改）", open=False):
-                        image_model = gr.Dropdown(
+                    check_image_button = gr.Button(
+                        "↻ 检测图片模型", elem_classes="cf-action-secondary"
+                    )
+                    image_model_status = gr.Markdown(
+                        _image_model_status_markdown(
+                            service.check_image_provider(default_image_provider)
+                        ),
+                        elem_classes="cf-mini-status",
+                    )
+                with gr.Group(
+                    visible=False, elem_id="cf-settings-lettering", elem_classes="cf-drawer-panel"
+                ) as lettering_settings_panel:
+                    gr.Markdown("#### 文字与气泡")
+                    lettering_style = gr.Dropdown(
+                        label="漫画排字方式",
+                        choices=[
+                            ("沉浸式漫画排字（推荐）", "immersive"),
+                            ("经典规则气泡", "classic"),
+                            ("极简无框文字", "minimal"),
+                        ],
+                        value="immersive",
+                    )
+                    bubble_theme = gr.Dropdown(
+                        label="气泡配色",
+                        choices=[
+                            ("经典漫画", "classic"),
+                            ("日式黑白", "manga"),
+                            ("现代彩漫", "modern"),
+                        ],
+                        value="classic",
+                    )
+                    show_narration = gr.Checkbox(label="显示旁白", value=True)
+                    show_panel_numbers = gr.Checkbox(
+                        label="显示分格编号（调试）",
+                        value=False,
+                    )
+                    auto_shorten_dialogue = gr.Checkbox(
+                        label="自动缩短过长台词",
+                        value=True,
+                    )
+
+            with gr.Column(scale=2, elem_classes="cf-main-column"):
+                with gr.Group(
+                    visible=False,
+                    elem_id="cf-advanced-settings-panel",
+                    elem_classes="cf-advanced-settings",
+                ) as advanced_settings_panel:
+                    gr.HTML(
+                        """
+                        <div class="cf-advanced-head">
+                          <div>
+                            <h3>图片设置</h3>
+                            <p>模型细项、参考图、备用服务和速度设置</p>
+                          </div>
+                        </div>
+                        """,
+                        padding=False,
+                    )
+                    close_advanced_settings_button = gr.Button(
+                        "×",
+                        size="sm",
+                        elem_id="cf-close-advanced-settings",
+                        elem_classes="cf-modal-close",
+                    )
+                    with gr.Row():
+                        image_model = gr.Radio(
                             label="具体图片模型",
                             choices=[
                                 (
@@ -1798,25 +2354,29 @@ def create_demo(
                                 )
                             ],
                             value=initial_image_definition.model_id,
+                            scale=2,
+                            elem_classes="cf-setting-choice",
                         )
-                        image_capabilities = gr.Markdown(
-                            _capabilities_markdown(
-                                active_image_registry,
-                                "mock-image",
-                            )
-                        )
-                        gr.Markdown("画面尺寸会根据你选择的页面与画框自动匹配。")
-                        secondary_image_provider = gr.Dropdown(
+                        secondary_image_provider = gr.Radio(
                             label="失败时备用图片服务",
                             choices=[
                                 ("无", ""),
-                                *active_image_registry.provider_choices(),
+                                *fallback_image_choices,
                             ],
                             value="",
+                            scale=1,
+                            elem_classes="cf-setting-choice",
                         )
-                        image_width = gr.State(value=None)
-                        image_height = gr.State(value=None)
-                        image_aspect_ratio = gr.State(value="")
+                    image_capabilities = gr.Markdown(
+                        _capabilities_markdown(
+                            active_image_registry,
+                            default_image_provider,
+                        )
+                    )
+                    image_width = gr.State(value=None)
+                    image_height = gr.State(value=None)
+                    image_aspect_ratio = gr.State(value="")
+                    with gr.Row():
                         image_quality = gr.Dropdown(
                             label="生成质量",
                             info="只有当前图片服务支持时才显示。",
@@ -1826,18 +2386,11 @@ def create_demo(
                             interactive=False,
                         )
                         image_seed = gr.Number(
-                            label="固定随机结果",
-                            info="填写相同数字可尝试复现相似画面；留空为随机。",
+                            label="系统随机 Seed",
+                            info="由系统自动为每个分格生成。",
                             precision=0,
                             minimum=0,
                             value=None,
-                            visible=False,
-                            interactive=False,
-                        )
-                        negative_prompt = gr.Textbox(
-                            label="不希望画面出现的内容",
-                            info="例如：水印、乱码、模糊。留空即可。",
-                            lines=2,
                             visible=False,
                             interactive=False,
                         )
@@ -1847,64 +2400,47 @@ def create_demo(
                             value="png",
                             visible=False,
                         )
+                    negative_prompt = gr.Textbox(
+                        label="不希望画面出现的内容",
+                        info="例如：水印、乱码、模糊。留空即可。",
+                        lines=2,
+                        visible=False,
+                        interactive=False,
+                    )
+                    with gr.Row(elem_classes="cf-advanced-section"):
                         reference_images = gr.File(
-                            label="角色或画风参考图（可多选）",
+                            label="单角色参考图",
                             file_count="multiple",
                             file_types=["image"],
                             type="filepath",
-                            height=140,
+                            height=160,
                             visible=False,
                             interactive=False,
+                            scale=1,
                         )
                         mask_image = gr.Image(
-                            label="局部修改范围图（白色区域会被修改）",
+                            label="局部修改范围图",
                             type="filepath",
                             height=180,
                             visible=False,
                             interactive=False,
+                            scale=1,
                         )
+                    with gr.Row(elem_classes="cf-advanced-section"):
                         strict_image_mode = gr.Checkbox(
                             label="真实图片失败时停止，不使用占位图",
                             value=False,
+                            scale=1,
                         )
                         image_concurrency = gr.Slider(
-                            label="同时生成几格（速度设置）",
-                            info="数值越大通常越快，也会占用更多本机或服务资源。",
+                            label="同时生成格数",
+                            info="数值越大通常越快，也会占用更多资源。",
                             minimum=1,
                             maximum=8,
                             value=1,
                             step=1,
+                            scale=2,
                         )
-                    with gr.Accordion("💬 文字与气泡", open=False):
-                        lettering_style = gr.Dropdown(
-                            label="漫画排字方式",
-                            choices=[
-                                ("沉浸式漫画排字（推荐）", "immersive"),
-                                ("经典规则气泡", "classic"),
-                                ("极简无框文字", "minimal"),
-                            ],
-                            value="immersive",
-                        )
-                        bubble_theme = gr.Dropdown(
-                            label="气泡配色",
-                            choices=[
-                                ("经典漫画", "classic"),
-                                ("日式黑白", "manga"),
-                                ("现代彩漫", "modern"),
-                            ],
-                            value="classic",
-                        )
-                        show_narration = gr.Checkbox(label="显示旁白", value=True)
-                        show_panel_numbers = gr.Checkbox(
-                            label="显示分格编号（调试）",
-                            value=False,
-                        )
-                        auto_shorten_dialogue = gr.Checkbox(
-                            label="自动缩短过长台词",
-                            value=True,
-                        )
-
-            with gr.Column(scale=2, elem_classes="cf-main-column"):
                 with gr.Group(elem_classes="cf-flow-hub"):
                     gr.HTML(
                         """
@@ -1941,6 +2477,7 @@ def create_demo(
                         script_button = gr.Button(
                             "生成分镜",
                             variant="primary",
+                            elem_classes="cf-action-primary",
                         )
                     with gr.Group(
                         visible=False,
@@ -1949,29 +2486,28 @@ def create_demo(
                         auto_generate_button = gr.Button(
                             "一键生成漫画",
                             variant="primary",
+                            elem_classes="cf-action-primary",
                         )
                 generation_status = gr.Markdown(
                     "等待开始",
-                    elem_classes="cf-status",
+                    elem_id="cf-global-notice",
+                    elem_classes=["cf-status", "cf-global-notice"],
                 )
                 with gr.Group(elem_classes="cf-canvas-shell"):
                     gr.HTML(
                         '<div class="cf-canvas-heading"><strong>漫画画布</strong>'
-                        "<span>整页或放大查看</span></div>",
+                        "<span>整页预览或全屏滚动查看</span></div>",
                         elem_id="cf-canvas-heading",
                         padding=False,
                     )
-                    preview_mode = gr.Radio(
-                        label="预览方式",
-                        choices=[
-                            ("整页预览", "fit"),
-                            ("放大阅读", "width"),
-                        ],
-                        value="fit",
-                        container=False,
-                        elem_id="cf-preview-mode",
-                        elem_classes="cf-preview-mode",
-                    )
+                    with gr.Row(elem_classes="cf-preview-controls"):
+                        fullscreen_button = gr.Button(
+                            "⛶ 全屏查看",
+                            size="sm",
+                            elem_id="cf-fullscreen-button",
+                            scale=0,
+                            min_width=132,
+                        )
                     preview = gr.Image(
                         label="漫画预览",
                         type="pil",
@@ -1981,7 +2517,7 @@ def create_demo(
                         elem_classes="cf-preview-fit",
                     )
                     gr.Markdown(
-                        "整页预览显示完整页面；放大阅读会铺满宽度并上下滚动。",
+                        "全屏后滚轮缩放，按住左键拖动画幅，双击恢复完整页面。",
                         elem_id="cf-preview-help",
                         elem_classes="cf-preview-help",
                     )
@@ -1992,8 +2528,8 @@ def create_demo(
                             placeholder="生成分镜后可在这里修改",
                         )
                         storyboard_editor = gr.Dataframe(
-                            headers=["序号", "画面描述", "对白", "旁白"],
-                            datatype=["number", "str", "str", "str"],
+                            headers=["序号", "画面描述", "对白", "旁白", "文字位置"],
+                            datatype=["number", "str", "str", "str", "str"],
                             type="array",
                             interactive=True,
                             label="逐格编辑",
@@ -2013,12 +2549,37 @@ def create_demo(
                             )
                             redesign_button = gr.Button(
                                 "↻ 重做分镜",
+                                elem_classes="cf-action-secondary",
                             )
                         generate_button = gr.Button(
                             "生成漫画",
                             variant="primary",
-                            elem_classes="cf-primary-action",
+                            elem_classes=["cf-primary-action", "cf-action-primary"],
                         )
+                        with gr.Row():
+                            regenerate_panel_number = gr.Number(
+                                label="重新生成第几格",
+                                value=1,
+                                minimum=1,
+                                step=1,
+                                precision=0,
+                            )
+                            regenerate_panel_button = gr.Button(
+                                "↻ 只重新生成这一格",
+                                elem_classes="cf-action-secondary",
+                            )
+                        with gr.Row():
+                            restore_panel_version = gr.Number(
+                                label="回退到历史版本",
+                                value=1,
+                                minimum=1,
+                                step=1,
+                                precision=0,
+                            )
+                            restore_panel_button = gr.Button(
+                                "↶ 恢复这一格的历史版本",
+                                elem_classes="cf-action-secondary",
+                            )
                         with gr.Accordion("📑 查看故事、角色与完整分镜", open=False):
                             details = gr.Markdown(
                                 "生成后将在这里显示故事、角色和完整分镜。"
@@ -2050,6 +2611,7 @@ def create_demo(
                             relocalize_button = gr.Button(
                                 "应用语言",
                                 variant="primary",
+                                elem_classes="cf-action-primary",
                             )
                     with gr.Tab("03 · 📁 项目与导出"):
                         gr.Markdown(
@@ -2066,6 +2628,7 @@ def create_demo(
                             load_project_button = gr.Button(
                                 "↥ 载入并继续编辑",
                                 scale=1,
+                                elem_classes="cf-action-secondary",
                             )
                         gr.Markdown(
                             "### ↓ 导出"
@@ -2085,6 +2648,82 @@ def create_demo(
                                 size="md",
                             )
 
+        settings_outputs = [
+            content_settings_panel,
+            page_settings_panel,
+            model_settings_panel,
+            lettering_settings_panel,
+            drawer_title,
+        ]
+        for button, section in (
+            (content_settings_button, "content"),
+            (page_settings_button, "page"),
+            (model_settings_button, "models"),
+            (lettering_settings_button, "lettering"),
+        ):
+            button.click(
+                fn=lambda selected=section: settings_drawer_updates(selected),
+                outputs=settings_outputs,
+            )
+
+        summary_inputs = [
+            theme,
+            style,
+            panel_count,
+            layout_mode,
+            provider,
+            image_provider,
+        ]
+        for component in summary_inputs:
+            component.change(
+                fn=project_summary_markdown,
+                inputs=summary_inputs,
+                outputs=[project_summary],
+            )
+        advanced_settings_button.click(
+            fn=lambda: advanced_settings_updates(True),
+            outputs=[advanced_settings_panel],
+        )
+        advanced_settings_button.click(
+            fn=None,
+            js="""
+            () => {
+              window.__comicforgeAdvancedDismiss?.();
+              const cleanup = () => {
+                document.removeEventListener('mousedown', outsideHandler, true);
+                document.removeEventListener('keydown', keyHandler, true);
+                window.__comicforgeAdvancedDismiss = null;
+              };
+              const closePanel = () => {
+                document.querySelector('#cf-close-advanced-settings button')?.click();
+                cleanup();
+              };
+              const outsideHandler = (event) => {
+                const panel = document.getElementById('cf-advanced-settings-panel');
+                if (panel && panel.offsetParent !== null && !panel.contains(event.target)) {
+                  closePanel();
+                }
+              };
+              const keyHandler = (event) => {
+                if (event.key === 'Escape') closePanel();
+              };
+              window.__comicforgeAdvancedDismiss = cleanup;
+              setTimeout(() => {
+                document.addEventListener('mousedown', outsideHandler, true);
+                document.addEventListener('keydown', keyHandler, true);
+              }, 0);
+            }
+            """,
+        )
+        close_advanced_settings_button.click(
+            fn=lambda: advanced_settings_updates(False),
+            outputs=[advanced_settings_panel],
+        )
+        close_advanced_settings_button.click(
+            fn=None,
+            js="""() => window.__comicforgeAdvancedDismiss?.()""",
+        )
+
         custom_layout_outputs = [
             custom_layout_state,
             custom_layout_table,
@@ -2097,58 +2736,125 @@ def create_demo(
             outputs=[custom_selected_index, custom_layout_status],
         )
         insert_custom_frame_button.click(
-            fn=handle_insert_custom_frame,
+            fn=_safe_side_callback(handle_insert_custom_frame, 5),
             inputs=[
                 custom_frame_type,
                 custom_layout_state,
                 custom_selected_index,
                 panel_count,
             ],
-            outputs=custom_layout_outputs,
+            outputs=[*custom_layout_outputs, generation_status],
         )
         replace_custom_frame_button.click(
-            fn=handle_replace_custom_frame,
+            fn=_safe_side_callback(handle_replace_custom_frame, 5),
             inputs=[
                 custom_frame_type,
                 custom_layout_state,
                 custom_selected_index,
                 panel_count,
             ],
-            outputs=custom_layout_outputs,
+            outputs=[*custom_layout_outputs, generation_status],
         )
         delete_custom_frame_button.click(
-            fn=handle_delete_custom_frame,
+            fn=_safe_side_callback(handle_delete_custom_frame, 5),
             inputs=[
                 custom_frame_type,
                 custom_layout_state,
                 custom_selected_index,
                 panel_count,
             ],
-            outputs=custom_layout_outputs,
+            outputs=[*custom_layout_outputs, generation_status],
         )
         reset_custom_layout_button.click(
-            fn=handle_reset_custom_layout,
+            fn=_safe_side_callback(handle_reset_custom_layout, 5),
             inputs=[
                 custom_frame_type,
                 custom_layout_state,
                 custom_selected_index,
                 panel_count,
             ],
-            outputs=custom_layout_outputs,
+            outputs=[*custom_layout_outputs, generation_status],
         )
 
-        preview_mode.change(
+        fullscreen_button.click(
             fn=None,
-            inputs=[preview_mode],
+            inputs=None,
             outputs=None,
             js="""
-            (mode) => {
+            () => {
               const canvas = document.getElementById('comic-preview');
-              if (!canvas) return;
-              canvas.classList.toggle('cf-preview-fit', mode === 'fit');
-              canvas.classList.toggle('cf-preview-width', mode === 'width');
-              const scroller = canvas.querySelector('.image-container, .wrap');
-              if (scroller) scroller.scrollTop = 0;
+              const shell = canvas?.closest('.cf-canvas-shell');
+              if (!shell) return;
+              if (!canvas.dataset.panZoomReady) {
+                canvas.dataset.panZoomReady = 'true';
+                const state = { scale: 1, x: 0, y: 0, dragging: false,
+                                startX: 0, startY: 0 };
+                const image = () => canvas.querySelector('img');
+                const apply = () => {
+                  const img = image();
+                  if (!img) return;
+                  img.style.transform = `translate(${state.x}px, ${state.y}px) scale(${state.scale})`;
+                };
+                const reset = () => {
+                  state.scale = 1;
+                  state.x = 0;
+                  state.y = 0;
+                  apply();
+                };
+                canvas.addEventListener('wheel', (event) => {
+                  if (document.fullscreenElement !== shell) return;
+                  event.preventDefault();
+                  const rect = canvas.getBoundingClientRect();
+                  const px = event.clientX - rect.left;
+                  const py = event.clientY - rect.top;
+                  const previous = state.scale;
+                  const factor = Math.exp(-event.deltaY * 0.0015);
+                  state.scale = Math.min(8, Math.max(0.25, previous * factor));
+                  const ratio = state.scale / previous;
+                  state.x = px - (px - state.x) * ratio;
+                  state.y = py - (py - state.y) * ratio;
+                  apply();
+                }, { passive: false });
+                canvas.addEventListener('pointerdown', (event) => {
+                  if (document.fullscreenElement !== shell || event.button !== 0) return;
+                  event.preventDefault();
+                  state.dragging = true;
+                  state.startX = event.clientX - state.x;
+                  state.startY = event.clientY - state.y;
+                  canvas.classList.add('cf-pan-active');
+                  canvas.setPointerCapture?.(event.pointerId);
+                });
+                canvas.addEventListener('pointermove', (event) => {
+                  if (!state.dragging) return;
+                  state.x = event.clientX - state.startX;
+                  state.y = event.clientY - state.startY;
+                  apply();
+                });
+                const stopDrag = (event) => {
+                  state.dragging = false;
+                  canvas.classList.remove('cf-pan-active');
+                  canvas.releasePointerCapture?.(event.pointerId);
+                };
+                canvas.addEventListener('pointerup', stopDrag);
+                canvas.addEventListener('pointercancel', stopDrag);
+                canvas.addEventListener('dblclick', (event) => {
+                  if (document.fullscreenElement !== shell) return;
+                  event.preventDefault();
+                  reset();
+                });
+                document.addEventListener('fullscreenchange', () => {
+                  if (document.fullscreenElement !== shell) reset();
+                });
+                canvas._cfResetPanZoom = reset;
+              }
+              if (document.fullscreenElement === shell) {
+                document.exitFullscreen?.();
+                return;
+              }
+              const request = shell.requestFullscreen?.();
+              request?.then(() => {
+                canvas._cfResetPanZoom?.();
+              });
             }
             """,
         )
@@ -2216,13 +2922,14 @@ def create_demo(
             ],
         )
         script_button.click(
-            fn=handle_script_generation,
+            fn=_safe_status_callback(handle_script_generation, 5),
             inputs=[
                 theme,
                 source_story,
                 style,
                 panel_count,
                 provider,
+                review_provider,
                 content_language,
                 layout_mode,
                 allow_multi_shot_panels,
@@ -2237,7 +2944,7 @@ def create_demo(
             ],
         )
         redesign_button.click(
-            fn=handle_story_redesign,
+            fn=_safe_status_callback(handle_story_redesign, 5),
             inputs=[script_state, storyboard_editor, story_guidance, provider],
             outputs=[
                 script_state,
@@ -2248,13 +2955,14 @@ def create_demo(
             ],
         )
         load_project_button.click(
-            fn=handle_project_load,
+            fn=_safe_status_callback(handle_project_load, 16),
             inputs=[project_upload],
             outputs=[
                 script_state,
                 details,
                 storyboard_editor,
                 content_language,
+                style,
                 story_guidance,
                 final_title,
                 layout_mode,
@@ -2269,14 +2977,16 @@ def create_demo(
             ],
         )
         generate_button.click(
-            fn=handle_confirmed_generation,
+            fn=_safe_status_callback(handle_confirmed_generation, 7),
             inputs=[
                 script_state,
                 storyboard_editor,
                 final_title,
+                style,
                 layout_mode,
                 allow_multi_shot_panels,
                 custom_layout_state,
+                provider,
                 image_provider,
                 image_model,
                 negative_prompt,
@@ -2307,8 +3017,64 @@ def create_demo(
                 generation_status,
             ],
         )
+        regenerate_panel_button.click(
+            fn=_safe_status_callback(handle_panel_regeneration, 7),
+            inputs=[
+                script_state,
+                storyboard_editor,
+                regenerate_panel_number,
+                provider,
+                image_provider,
+                image_model,
+                negative_prompt,
+                image_quality,
+                image_seed,
+                image_output_format,
+                reference_images,
+                mask_image,
+                strict_image_mode,
+                secondary_image_provider,
+                bubble_theme,
+                lettering_style,
+                show_narration,
+                show_panel_numbers,
+                auto_shorten_dialogue,
+            ],
+            outputs=[
+                script_state,
+                preview,
+                details,
+                download,
+                pdf_download,
+                project_download,
+                generation_status,
+            ],
+        )
+        restore_panel_button.click(
+            fn=_safe_status_callback(handle_panel_restore, 7),
+            inputs=[
+                script_state,
+                storyboard_editor,
+                regenerate_panel_number,
+                restore_panel_version,
+                bubble_theme,
+                lettering_style,
+                show_narration,
+                show_panel_numbers,
+                auto_shorten_dialogue,
+            ],
+            outputs=[
+                script_state,
+                preview,
+                details,
+                download,
+                pdf_download,
+                project_download,
+                generation_status,
+            ],
+        )
         auto_generate_button.click(
-            fn=handle_auto_generation,
+            fn=_safe_status_callback(handle_auto_generation, 9),
             inputs=[
                 generation_mode,
                 theme,
@@ -2352,7 +3118,7 @@ def create_demo(
             ],
         )
         relocalize_button.click(
-            fn=handle_relocalization,
+            fn=_safe_status_callback(handle_relocalization, 10),
             inputs=[
                 script_state,
                 storyboard_editor,

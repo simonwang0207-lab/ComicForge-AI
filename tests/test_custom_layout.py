@@ -213,8 +213,8 @@ def test_custom_layout_service_uses_per_frame_generation_ratios(
         (1024, 512),
         (1024, 512),
     ]
-    assert "目标画框为 1:1 方形半行画框" in provider.requests[0].prompt
-    assert "目标画框为 2:1 超宽通栏" in provider.requests[4].prompt
+    assert "1:1" in provider.requests[0].prompt
+    assert "2:1" in provider.requests[4].prompt
     assert result.comic_page.height > result.comic_page.width
     assert result.project.custom_layout == _reference_layout()
     assert result.project_json_path is not None

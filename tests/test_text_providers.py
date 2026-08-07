@@ -92,6 +92,96 @@ def test_ollama_provider_uses_mock_http_response() -> None:
     ]
 
 
+def test_ollama_review_uses_independent_shorter_timeout() -> None:
+    seen_read_timeouts: list[float] = []
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        assert method == "POST"
+        seen_read_timeouts.append(timeout.read)
+        return {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "project_patch": {},
+                        "review_notes": ["初稿无需修改。"],
+                        "script_reviewed": True,
+                    },
+                    ensure_ascii=False,
+                )
+            }
+        }
+
+    provider = OllamaTextModel(
+        base_url="http://127.0.0.1:11434",
+        model="qwen3:4b",
+        generation_timeout=300,
+        review_timeout=45,
+        max_retries=0,
+        transport=fake_transport,
+    )
+
+    reviewed = provider.review_project(
+        MockTextModel().generate_project("独立审查超时", "漫画", 2)
+    )
+
+    assert reviewed.script_reviewed is True
+    assert seen_read_timeouts == [45]
+
+
+def test_openai_compatible_review_uses_independent_shorter_timeout() -> None:
+    seen_read_timeouts: list[float] = []
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        assert method == "POST"
+        seen_read_timeouts.append(timeout.read)
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "project_patch": {},
+                                "review_notes": ["初稿无需修改。"],
+                                "script_reviewed": True,
+                            },
+                            ensure_ascii=False,
+                        )
+                    },
+                }
+            ]
+        }
+
+    provider = OpenAICompatibleTextModel(
+        base_url="https://example.invalid/v1",
+        api_key="test-key",
+        model="test-model",
+        generation_timeout=300,
+        review_timeout=40,
+        max_retries=0,
+        transport=fake_transport,
+    )
+
+    reviewed = provider.review_project(
+        MockTextModel().generate_project("兼容接口审查超时", "漫画", 2)
+    )
+
+    assert reviewed.script_reviewed is True
+    assert seen_read_timeouts == [40]
+
+
 def test_openai_compatible_provider_uses_mock_http_response() -> None:
     seen_authorization: list[str] = []
 
@@ -134,6 +224,182 @@ def test_openai_compatible_provider_uses_mock_http_response() -> None:
 
     assert len(project.panels) == 2
     assert seen_authorization == ["Bearer placeholder"] * 2
+
+
+def test_openai_compatible_qwen3_disables_thinking_for_ollama_endpoint() -> None:
+    payloads: list[dict[str, object]] = []
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        assert payload is not None
+        payloads.append(payload)
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": json.dumps(
+                            comic_payload(1), ensure_ascii=False
+                        )
+                    },
+                }
+            ]
+        }
+
+    provider = OpenAICompatibleTextModel(
+        base_url="http://127.0.0.1:11434/v1",
+        api_key="placeholder",
+        model="qwen3:4b",
+        max_retries=0,
+        transport=fake_transport,
+    )
+
+    provider.generate_project("关闭推理", "漫画", 1)
+
+    payload = payloads[0]
+    assert payload["reasoning_effort"] == "none"
+    assert payload["max_tokens"] == 4096
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    assert any(
+        str(message.get("content", "")).startswith("/no_think")
+        for message in messages
+        if isinstance(message, dict) and message.get("role") == "user"
+    )
+
+
+def test_openai_compatible_local_ollama_can_release_model_resources() -> None:
+    calls: list[tuple[str, str, dict[str, str], dict[str, object] | None]] = []
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        calls.append((method, url, headers, payload))
+        return {"done": True}
+
+    provider = OpenAICompatibleTextModel(
+        base_url="http://127.0.0.1:11434/v1",
+        api_key="placeholder",
+        model="qwen3:4b",
+        transport=fake_transport,
+    )
+
+    status = provider.release_resources()
+
+    assert status.attempted is True
+    assert status.released is True
+    assert calls == [
+        (
+            "POST",
+            "http://127.0.0.1:11434/api/generate",
+            {},
+            {"model": "qwen3:4b", "keep_alive": 0, "stream": False},
+        )
+    ]
+
+
+def test_remote_openai_compatible_does_not_receive_ollama_release_request() -> None:
+    called = False
+
+    def fake_transport(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal called
+        called = True
+        return {}
+
+    provider = OpenAICompatibleTextModel(
+        base_url="https://example.invalid/v1",
+        api_key="placeholder",
+        model="qwen3:4b",
+        transport=fake_transport,
+    )
+
+    status = provider.release_resources()
+
+    assert status.attempted is False
+    assert status.released is False
+    assert called is False
+
+
+def test_native_ollama_can_release_model_resources() -> None:
+    payloads: list[dict[str, object] | None] = []
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        assert method == "POST"
+        assert url == "http://127.0.0.1:11434/api/generate"
+        payloads.append(payload)
+        return {"done": True}
+
+    provider = OllamaTextModel(
+        base_url="http://127.0.0.1:11434",
+        model="qwen3:4b",
+        transport=fake_transport,
+    )
+
+    status = provider.release_resources()
+
+    assert status.released is True
+    assert payloads == [
+        {"model": "qwen3:4b", "keep_alive": 0, "stream": False}
+    ]
+
+
+def test_openai_compatible_generic_model_keeps_standard_payload() -> None:
+    payloads: list[dict[str, object]] = []
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        assert payload is not None
+        payloads.append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            comic_payload(1), ensure_ascii=False
+                        )
+                    }
+                }
+            ]
+        }
+
+    provider = OpenAICompatibleTextModel(
+        base_url="https://example.invalid/v1",
+        api_key="placeholder",
+        model="generic-model",
+        max_retries=0,
+        transport=fake_transport,
+    )
+
+    provider.generate_project("通用模型", "漫画", 1)
+
+    assert "reasoning_effort" not in payloads[0]
+    messages = payloads[0]["messages"]
+    assert isinstance(messages, list)
+    assert all(
+        not str(message.get("content", "")).startswith("/no_think")
+        for message in messages
+        if isinstance(message, dict)
+    )
 
 
 def test_openai_compatible_repairs_missing_fields_from_clean_context() -> None:
@@ -232,6 +498,63 @@ def test_remote_provider_repairs_invalid_json_once() -> None:
     )
 
     assert provider.generate_project("寻找走失的小狗", "治愈水彩", 1).panel_count == 1
+
+
+def test_openai_compatible_retries_truncation_with_larger_clean_budget() -> None:
+    payloads: list[dict[str, object]] = []
+    truncated_marker = "TRUNCATED_CONTENT_MUST_NOT_BE_REUSED"
+    responses = iter(
+        [
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": truncated_marker},
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json.dumps(
+                                comic_payload(2), ensure_ascii=False
+                            )
+                        },
+                    }
+                ]
+            },
+        ]
+    )
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        assert payload is not None
+        payloads.append(payload)
+        return next(responses)
+
+    provider = OpenAICompatibleTextModel(
+        base_url="https://example.invalid/v1",
+        api_key="placeholder",
+        model="demo-model",
+        max_tokens=4096,
+        max_retries=0,
+        transport=fake_transport,
+    )
+
+    project = provider.generate_project("自动扩容", "漫画", 2)
+
+    assert project.panel_count == 2
+    assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
+    retry_messages = payloads[1]["messages"]
+    assert truncated_marker not in json.dumps(retry_messages, ensure_ascii=False)
+    assert "长度上限" in json.dumps(retry_messages, ensure_ascii=False)
 
 
 def test_ollama_translation_repairs_item_count_with_stable_ids() -> None:

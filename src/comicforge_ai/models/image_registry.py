@@ -54,6 +54,14 @@ class ImageProviderRegistry:
             for provider in self.list()
         ]
 
+    def configured_provider_choices(self) -> list[tuple[str, str]]:
+        """Return providers whose required local settings are present."""
+        return [
+            (f"{provider.display_name} · {provider.model_name}", provider.model_id)
+            for provider in self.list()
+            if provider.validate_config().configured
+        ]
+
     def model_definitions(self, provider_id: str) -> list[ImageModelDefinition]:
         return self.get(provider_id).model_definitions()
 
@@ -164,6 +172,12 @@ def build_default_image_registry(
                 width_node_id=env.get("COMFYUI_WIDTH_NODE_ID", ""),
                 height_node_id=env.get("COMFYUI_HEIGHT_NODE_ID", ""),
                 seed_node_id=env.get("COMFYUI_SEED_NODE_ID", ""),
+                negative_prompt_node_id=env.get(
+                    "COMFYUI_NEGATIVE_PROMPT_NODE_ID", ""
+                ),
+                reference_image_node_id=env.get(
+                    "COMFYUI_REFERENCE_IMAGE_NODE_ID", ""
+                ),
                 connect_timeout=connect_timeout,
                 generation_timeout=generation_timeout,
                 max_retries=retries,

@@ -39,6 +39,14 @@ class TextModelRegistry:
             for provider in self.list()
         ]
 
+    def configured_choices(self) -> list[tuple[str, str]]:
+        """Return only locally configured providers for interactive UIs."""
+        return [
+            (f"{provider.display_name} · {provider.model_name}", provider.model_id)
+            for provider in self.list()
+            if provider.configuration_status().configured
+        ]
+
 
 def _number_setting(
     environment: Mapping[str, str], name: str, default: float
@@ -56,6 +64,17 @@ def _integer_setting(
         return int(environment.get(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+def _optional_boolean_setting(
+    environment: Mapping[str, str], name: str
+) -> bool | None:
+    value = environment.get(name, "auto").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def build_default_registry(
@@ -79,6 +98,11 @@ def build_default_registry(
                 generation_timeout=_number_setting(
                     env, "OLLAMA_GENERATION_TIMEOUT", generation_timeout
                 ),
+                review_timeout=_number_setting(
+                    env,
+                    "OLLAMA_REVIEW_TIMEOUT",
+                    _number_setting(env, "TEXT_MODEL_REVIEW_TIMEOUT", 90),
+                ),
                 status_timeout=status_timeout,
                 num_predict=_integer_setting(env, "OLLAMA_NUM_PREDICT", 4096),
                 num_ctx=_integer_setting(env, "OLLAMA_NUM_CTX", 8192),
@@ -90,8 +114,20 @@ def build_default_registry(
                 model=env.get("OPENAI_COMPATIBLE_MODEL", ""),
                 connect_timeout=connect_timeout,
                 generation_timeout=generation_timeout,
+                review_timeout=_number_setting(
+                    env, "TEXT_MODEL_REVIEW_TIMEOUT", 90
+                ),
                 status_timeout=status_timeout,
                 max_retries=retries,
+                max_tokens=_integer_setting(
+                    env, "OPENAI_COMPATIBLE_MAX_TOKENS", 4096
+                ),
+                disable_thinking=_optional_boolean_setting(
+                    env, "OPENAI_COMPATIBLE_DISABLE_THINKING"
+                ),
+                reasoning_effort=env.get(
+                    "OPENAI_COMPATIBLE_REASONING_EFFORT", ""
+                ),
             ),
         ]
     )

@@ -71,6 +71,11 @@ class MockTextModel(TextModelProvider):
                 appearance=f"圆润轮廓、亮色外套，采用{clean_style}表现",
                 personality="好奇、勇敢，偶尔有点冒失",
                 visual_prompt=f"小漫，圆润轮廓，亮色外套，{clean_style}漫画角色",
+                entity_type="human",
+                species_or_category="young human adventurer",
+                body_structure="human child proportions",
+                identity_features=["round silhouette", "bright coat"],
+                avoid_features=["animal body", "robot body"],
             ),
             CharacterProfile(
                 name="阿格",
@@ -78,6 +83,11 @@ class MockTextModel(TextModelProvider):
                 appearance=f"方形小机器人，带有{clean_style}装饰纹理",
                 personality="冷静、可靠，喜欢说俏皮话",
                 visual_prompt=f"阿格，方形小机器人，装饰纹理，{clean_style}漫画角色",
+                entity_type="robot",
+                species_or_category="small companion robot",
+                body_structure="compact square mechanical body",
+                identity_features=["square silhouette", "decorative texture"],
+                avoid_features=["human face", "organic human body"],
             ),
         ]
 
@@ -147,10 +157,13 @@ class MockTextModel(TextModelProvider):
                         ),
                     ],
                     image_prompt=(
-                        f"{clean_style}漫画，小漫（圆润轮廓、亮色外套）和阿格"
-                        f"（方形小机器人），{beat_text}，画面清晰，角色一致；"
-                        f"人物位于{speaker_position}，{bubble_position}保留干净低细节负空间；"
-                        "画面中不要出现文字、字母、标题、水印或现成气泡"
+                        "A polished comic illustration of a rounded young adventurer "
+                        "in a bright jacket and a small square companion robot, acting "
+                        f"out narrative beat {index + 1} with clear readable poses. "
+                        "Keep their exact character design and colors consistent. "
+                        f"Place the speaking character at {speaker_position} and leave "
+                        f"clean low-detail space at {bubble_position}. Soft cinematic "
+                        "light, balanced composition, no text, no watermark, no bubble."
                     ),
                 )
             )
@@ -200,6 +213,9 @@ class MockTextModel(TextModelProvider):
                 key_objects=[clean_theme],
                 timeline=[panel.narrative_role for panel in panels],
                 visual_style=clean_style,
+                visual_style_prompt=(
+                    "clean comic illustration, consistent linework, controlled colors"
+                ),
             ),
         )
 
@@ -266,7 +282,8 @@ class MockTextModel(TextModelProvider):
         for panel in revised.panels:
             panel.scene = f"依据用户故事说明设计：{panel.scene}"
             panel.image_prompt = (
-                f"用户故事依据：{cumulative_guidance}；{panel.image_prompt}"
+                f"{panel.image_prompt} Follow the revised storyboard facts for panel "
+                f"{panel.sequence} while preserving the same visual identity."
             )
         return revised
 

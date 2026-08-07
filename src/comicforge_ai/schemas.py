@@ -14,6 +14,26 @@ class CharacterProfile(BaseModel):
     appearance: str = Field(min_length=1, description="外观特征")
     personality: str = Field(min_length=1, description="性格特点")
     visual_prompt: str = Field(default="", description="保持视觉一致性的角色提示词")
+    entity_type: str = Field(
+        default="",
+        description="供绘图使用的通用实体类型，如 human、animal、robot 或 vehicle",
+    )
+    species_or_category: str = Field(
+        default="",
+        description="供绘图使用的具体物种、角色类别或物体类别",
+    )
+    body_structure: str = Field(
+        default="",
+        description="供绘图使用的稳定身体结构、轮廓或机械结构",
+    )
+    identity_features: list[str] = Field(
+        default_factory=list,
+        description="跨分格必须保留的英文视觉身份特征",
+    )
+    avoid_features: list[str] = Field(
+        default_factory=list,
+        description="与该角色身份冲突、绘图时应排除的英文特征",
+    )
     age: str = Field(default="", description="年龄或年龄段")
     gender: str = Field(default="", description="性别或外观性别表达")
     hairstyle: str = Field(default="", description="发型与发色")
@@ -103,6 +123,10 @@ class StoryBible(BaseModel):
     key_objects: list[str] = Field(default_factory=list)
     timeline: list[str] = Field(default_factory=list)
     visual_style: str = ""
+    visual_style_prompt: str = Field(
+        default="",
+        description="供图像 Provider 使用的英文全项目风格提示词",
+    )
 
 
 class SubShot(BaseModel):
@@ -283,6 +307,19 @@ class PanelImageRecord(BaseModel):
     actual_parameters: dict[str, Any] = Field(default_factory=dict)
     fallback_used: bool = False
     error_summary: str = ""
+    reference_source: str = ""
+    reference_panel_sequence: int | None = Field(default=None, ge=1)
+
+
+class PanelImageVersion(BaseModel):
+    """Immutable archived raw-panel revision that can be restored later."""
+
+    sequence: int = Field(ge=1)
+    version: int = Field(ge=1)
+    local_path: str = Field(min_length=1)
+    archived_at: str = Field(min_length=1)
+    reason: str = "regeneration"
+    record: PanelImageRecord
 
 
 class ComicProject(BaseModel):
@@ -296,11 +333,21 @@ class ComicProject(BaseModel):
     characters: list[CharacterProfile] = Field(min_length=1)
     panels: list[PanelSpec] = Field(min_length=1)
     pages: list[ComicPage] = Field(default_factory=list)
+    requested_text_provider: str = ""
+    requested_text_model: str = ""
+    actual_text_provider: str = ""
+    actual_text_model: str = ""
+    requested_review_provider: str = ""
+    requested_review_model: str = ""
+    actual_review_provider: str = ""
+    actual_review_model: str = ""
+    review_applied: bool = False
     requested_image_provider: str = ""
     requested_image_model: str = ""
     image_fallback_used: bool = False
     image_error_summary: str = ""
     panel_images: list[PanelImageRecord] = Field(default_factory=list)
+    panel_image_versions: list[PanelImageVersion] = Field(default_factory=list)
     output_path: Path | None = None
     content_language: ContentLanguage = "zh-CN"
     layout_mode: LayoutMode = "grid"

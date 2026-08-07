@@ -15,6 +15,7 @@ class RecraftImageProvider(JsonImageProvider):
     model_id = "recraft"
     display_name = "Recraft Image"
     provider_type = "remote_http"
+    prompt_profile = "rich_localized"
     api_key_environment = "RECRAFT_API_KEY"
     default_endpoint = "https://external.api.recraft.ai/v1/images/generations"
     capabilities = ImageProviderCapabilities(

@@ -8,6 +8,10 @@ from comicforge_ai.models import (
     MockTextModel,
     TextModelRegistry,
 )
+from comicforge_ai.models.base import (
+    TextModelOutputError,
+    TextModelResourceReleaseStatus,
+)
 from comicforge_ai.schemas import ComicProject, ContentLanguage
 from comicforge_ai.service import ComicGenerator, ImageGenerationOptions
 from comicforge_ai.ui import relocalize_for_ui
@@ -24,6 +28,66 @@ class CountingImageProvider(MockImageModel):
     def generate(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
         self.calls += 1
         return super().generate(*args, **kwargs)  # type: ignore[arg-type]
+
+
+class LocalCountingImageProvider(CountingImageProvider):
+    model_id = "local-counting-image"
+    uses_local_accelerator = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    def generate(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            return super().generate(*args, **kwargs)
+        finally:
+            self.active_calls -= 1
+
+
+class ReleasableTextProvider(MockTextModel):
+    model_id = "releasable-text"
+
+    def __init__(self, *, succeeds: bool = True) -> None:
+        super().__init__()
+        self.release_calls = 0
+        self.succeeds = succeeds
+
+    def release_resources(self) -> TextModelResourceReleaseStatus:
+        self.release_calls += 1
+        return TextModelResourceReleaseStatus(
+            attempted=True,
+            released=self.succeeds,
+            message=("显存已释放" if self.succeeds else "显存释放失败"),
+            elapsed_seconds=0.01,
+        )
+
+
+class IndependentReviewProvider(MockTextModel):
+    model_id = "independent-review"
+    display_name = "Independent Review"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.review_calls = 0
+
+    def review_project(self, project: ComicProject) -> ComicProject:
+        self.review_calls += 1
+        reviewed = project.model_copy(deep=True)
+        reviewed.review_notes.append("独立审查模型已检查")
+        reviewed.script_reviewed = True
+        return reviewed
+
+
+class FailingReviewProvider(MockTextModel):
+    model_id = "failing-review"
+    display_name = "Failing Review"
+
+    def review_project(self, project: ComicProject) -> ComicProject:
+        raise TextModelOutputError("审查补丁仍然无效")
 
 
 class TranslationTextProvider(MockTextModel):
@@ -88,6 +152,90 @@ def test_script_confirmation_prevents_early_image_calls(tmp_path: Path) -> None:
     assert result.project_json_path is not None
     saved = result.project_json_path.read_text(encoding="utf-8")
     assert '"content_language": "en"' in saved
+
+
+def test_confirmed_project_can_sync_a_new_style_without_stale_style_prompt() -> None:
+    generator = ComicGenerator()
+    project = MockTextModel().generate_project("风格切换", "清新治愈", 3)
+    project.story_bible.visual_style_prompt = "old healing style prompt"
+
+    updated = generator.apply_style_selection(project, "科幻霓虹")
+
+    assert updated.style == "科幻霓虹"
+    assert updated.story_bible.visual_style == "科幻霓虹"
+    assert updated.story_bible.visual_style_prompt == ""
+    assert project.style == "清新治愈"
+
+
+def test_confirmed_project_keeps_matching_model_authored_style_prompt() -> None:
+    generator = ComicGenerator()
+    project = MockTextModel().generate_project("风格保持", "清新治愈", 3)
+    project.story_bible.visual_style_prompt = "matching healing style prompt"
+
+    updated = generator.apply_style_selection(project, "清新治愈")
+
+    assert updated.story_bible.visual_style_prompt == "matching healing style prompt"
+
+
+def test_storyboard_edit_can_override_panel_text_position() -> None:
+    generator = ComicGenerator()
+    project = MockTextModel().generate_project("手动排字", "漫画", 1)
+    rows = [[1, "画面", "小漫：出发！", "清晨", "bottom_right"]]
+
+    updated = generator.apply_storyboard_edits(project, rows)
+
+    positioned = [
+        item.preferred_position
+        for item in updated.panels[0].text_items
+        if item.type in {"speech", "narration"}
+    ]
+    assert positioned == ["bottom_right", "bottom_right"]
+
+
+def test_script_can_use_a_separate_review_provider() -> None:
+    reviewer = IndependentReviewProvider()
+    generator = ComicGenerator(
+        registry=TextModelRegistry([MockTextModel(), reviewer])
+    )
+
+    result = generator.generate_script_with_status(
+        "独立审查",
+        "漫画",
+        2,
+        provider_id="mock",
+        review_provider_id="independent-review",
+    )
+
+    assert reviewer.review_calls == 1
+    assert result.project.script_reviewed is True
+    assert result.project.requested_text_provider == "mock"
+    assert result.project.actual_text_provider == "mock"
+    assert result.project.requested_review_provider == "independent-review"
+    assert result.project.actual_review_provider == "independent-review"
+    assert result.project.review_applied is True
+    assert "独立审查模型已检查" in result.project.review_notes
+    assert "Independent Review" in result.actual_provider_name
+
+
+def test_failed_review_keeps_the_validated_draft_usable() -> None:
+    generator = ComicGenerator(
+        registry=TextModelRegistry([MockTextModel(), FailingReviewProvider()]),
+        fallback_to_mock=False,
+    )
+
+    result = generator.generate_script_with_status(
+        "保留初稿",
+        "漫画",
+        2,
+        provider_id="mock",
+        review_provider_id="failing-review",
+    )
+
+    assert result.project.panel_count == 2
+    assert result.project.script_reviewed is False
+    assert result.fallback_used is False
+    assert "审查未应用" in result.fallback_reason
+    assert "审查未应用" in result.actual_provider_name
 
 
 def test_user_can_supply_a_script_before_first_storyboard_generation(
@@ -177,6 +325,80 @@ def test_explicit_auto_mode_calls_text_then_images(tmp_path: Path) -> None:
     assert result.project.layout_mode == "webtoon"
     assert result.project.allow_multi_shot_panels is True
     assert result.project.output_path is not None
+
+
+def test_auto_mode_releases_local_text_resources_before_local_images(
+    tmp_path: Path,
+) -> None:
+    text_provider = ReleasableTextProvider()
+    image_provider = LocalCountingImageProvider()
+    generator = ComicGenerator(
+        registry=TextModelRegistry([MockTextModel(), text_provider]),
+        image_registry=ImageProviderRegistry([MockImageModel(), image_provider]),
+        output_dir=tmp_path,
+        image_fallback_to_mock=False,
+    )
+
+    result = generator.generate_auto_with_status(
+        "显存交接",
+        "现代彩漫",
+        2,
+        text_provider_id="releasable-text",
+        image_provider_id="local-counting-image",
+    )
+
+    assert text_provider.release_calls == 1
+    assert image_provider.calls == 2
+    assert result.text_resource_release_attempted is True
+    assert result.text_resource_release_succeeded is True
+    assert result.text_resource_release_message == "显存已释放"
+
+
+def test_release_failure_does_not_block_local_image_generation(
+    tmp_path: Path,
+) -> None:
+    text_provider = ReleasableTextProvider(succeeds=False)
+    image_provider = LocalCountingImageProvider()
+    generator = ComicGenerator(
+        registry=TextModelRegistry([MockTextModel(), text_provider]),
+        image_registry=ImageProviderRegistry([MockImageModel(), image_provider]),
+        output_dir=tmp_path,
+        image_fallback_to_mock=False,
+    )
+
+    result = generator.render_confirmed_project(
+        text_provider.generate_project("释放失败", "漫画", 1),
+        "local-counting-image",
+        text_provider_id="releasable-text",
+    )
+
+    assert text_provider.release_calls == 1
+    assert image_provider.calls == 1
+    assert result.text_resource_release_attempted is True
+    assert result.text_resource_release_succeeded is False
+
+
+def test_local_image_provider_is_forced_to_single_panel_concurrency(
+    tmp_path: Path,
+) -> None:
+    image_provider = LocalCountingImageProvider()
+    generator = ComicGenerator(
+        image_registry=ImageProviderRegistry([MockImageModel(), image_provider]),
+        output_dir=tmp_path,
+        image_fallback_to_mock=False,
+    )
+
+    generator.generate_with_status(
+        "本地显卡串行",
+        "漫画",
+        4,
+        provider_id="mock",
+        image_provider_id="local-counting-image",
+        image_options=ImageGenerationOptions(concurrency=4),
+    )
+
+    assert image_provider.calls == 4
+    assert image_provider.max_active_calls == 1
 
 
 def test_old_project_json_migrates_language_and_text_items() -> None:

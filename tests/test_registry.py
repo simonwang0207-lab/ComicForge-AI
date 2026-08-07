@@ -40,3 +40,15 @@ def test_registry_configures_separate_ollama_timeouts() -> None:
     assert provider.status_timeout == 7  # type: ignore[attr-defined]
     assert provider.num_predict == 4096  # type: ignore[attr-defined]
     assert provider.num_ctx == 8192  # type: ignore[attr-defined]
+
+
+def test_configured_choices_hide_unconfigured_text_providers() -> None:
+    registry = build_default_registry({})
+
+    assert [value for _, value in registry.configured_choices()] == ["mock"]
+
+    configured = build_default_registry({"OLLAMA_MODEL": "qwen3:4b"})
+    assert [value for _, value in configured.configured_choices()] == [
+        "mock",
+        "ollama",
+    ]

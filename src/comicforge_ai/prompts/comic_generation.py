@@ -10,8 +10,17 @@ from comicforge_ai.schemas import ComicProject, ContentLanguage, LayoutMode
 SYSTEM_PROMPT = """你是专业漫画编剧、事实核查员和分镜师。请把用户创意转化为结构化漫画方案。
 先建立 story_bible，再写分镜。必须保持人物身份、时间线、道具状态和角色设定前后一致；
 每格承担不同的叙事作用，动作必须能由单张静态图片表现；对白简短自然，适合漫画气泡；
-每格应规划角色位置、气泡位置和干净负空间。image_prompt 应明确统一角色外观、当前动作、
-场景、构图、光线、视觉风格和负空间，并禁止画面中出现文字、水印或现成气泡。
+每格应规划角色位置、气泡位置和干净负空间。无论漫画内容语言是什么，image_prompt
+必须只使用简洁自然的英文，明确统一角色外观、当前动作、场景、镜头、构图、
+光线、视觉风格和负空间，并禁止画面中出现文字、水印或现成气泡。
+每个角色的 entity_type、species_or_category、body_structure、identity_features 和
+avoid_features 必须使用简洁英文填写。它们是通用实体身份约束，不得把动物、机器人、
+怪物、车辆或物体擅自改成人类，也不得把人类改成其他实体类型。
+identity_features 必须列出 4–8 个跨格可核对的固定特征；在适用时明确正常的数量、
+排列和结构，例如眼睛、耳朵、肢体、轮子或机械部件。avoid_features 必须列出会破坏
+该角色身份的缺失、合并、增生、替换或错误结构。不要默认所有角色都具有人类结构。
+story_bible.visual_style_prompt 也必须使用英文，把用户的任意风格描述转换成适合图像
+模型复用的明确画风、线条、上色、光线和材质提示词。
 对无法确定的事实不要编造为确定事实。
 只输出一个合法 JSON 对象，不要使用 Markdown 代码块，不要在 JSON 外添加解释。"""
 
@@ -77,6 +86,15 @@ def _schema_example(
                 "appearance": "稳定、可识别的外观特征",
                 "personality": "性格设定",
                 "visual_prompt": "供后续绘图复用的角色视觉提示词",
+                "entity_type": "human/animal/robot/creature/vehicle/object 等英文类别",
+                "species_or_category": "具体物种、角色类别或物体类别，使用英文",
+                "body_structure": "稳定身体结构、轮廓或机械结构，使用英文",
+                "identity_features": [
+                    "4–8 个英文固定视觉特征；适用时写清数量、排列和结构"
+                ],
+                "avoid_features": [
+                    "会造成特征缺失、合并、增生、替换或身份改变的英文描述"
+                ],
                 "age": "年龄或年龄段",
                 "gender": "性别或外观性别表达",
                 "hairstyle": "固定发型与发色",
@@ -102,6 +120,7 @@ def _schema_example(
             "key_objects": ["贯穿故事的关键道具及状态"],
             "timeline": ["按因果顺序排列的事件"],
             "visual_style": "所有分格统一视觉风格",
+            "visual_style_prompt": "English image-model style anchor for all panels",
         },
         "panels": [
             {
@@ -138,7 +157,11 @@ def _schema_example(
                         "presentation": "auto",
                     },
                 ],
-                "image_prompt": "统一角色特征、当前动作、构图、负空间和禁字要求",
+                "image_prompt": (
+                    "A concise English-only image prompt describing the exact "
+                    "characters, action, setting, camera shot, composition, lighting, "
+                    "comic style, clean bubble space, and no text or watermark"
+                ),
             }
         ],
         "review_notes": [],
@@ -193,8 +216,16 @@ def build_comic_generation_messages(
 
 必须恰好生成 {panel_count} 个 panels，sequence 从 1 连续编号到 {panel_count}。
 characters 可以有任意合理数量；每格的 characters 只能使用角色列表中已有的 name。
-标题、概要、对白、旁白、拟声词和常见人物译名必须使用{LANGUAGE_NAMES[language]}；JSON 字段名保持英文。
-对白建议每项不超过 25 个中文/日文字符或 12 个英文单词，不能写成长段解释。
+标题、概要、角色说明、scene、visual_description、action、narrative_role、对白、旁白、
+拟声词和常见人物译名必须使用{LANGUAGE_NAMES[language]}，这些字段会直接给用户审查；
+JSON 字段名保持英文。
+image_prompt 是例外：每格 image_prompt 必须只用英文，不得包含中文或日文，建议控制在
+35–65 个英文单词；只需用角色类别或简短称呼标识主体，重点写当前场景、动作、镜头距离、
+构图、光线、统一漫画风格与“no text, no watermark”。不要重复堆叠角色外貌、器官或
+身体结构；这些固定身份信息由 characters 字段统一提供给图像模型。
+对白建议每项不超过 25 个中文/日文字符或 12 个英文单词，不能写成长段解释。不同分格不得
+重复“称呼+今日我……”“你竟敢……”等同一套句式；对白不要逐字复述画面动作，而应体现
+不同人物的立场、反应、冲突推进或信息差。
 title_candidates 生成 3 个自然具体、贴合核心冲突的候选标题，title 选择其中最佳一个。
 避免“XX的暗影/命运/传奇/觉醒”等与具体情节无关的模板标题，除非用户明确要求。
 text_items 支持 speech、thought、narration、sfx；旧版 dialogue/narration 没有内容时使用空字符串。
@@ -251,27 +282,67 @@ panels 必须恰好包含 {panel_count} 个对象，sequence 从 1 连续编号�
 
 
 def build_story_review_messages(project: ComicProject) -> list[dict[str, str]]:
-    """Request a fact-aware review and a fully revised project."""
+    """Request a fact-aware review using a compact, narrative-only snapshot."""
     requirements = [
         "人物是否属于同一合理时间线，身份和关系是否准确、自洽",
         "相邻分格是否存在明确因果，角色、道具和场景状态是否连续",
         "每格动作是否能由一张静态图片清晰表现",
         "整体是否形成建立—发展—转折—结果（按格数合理调整）",
         "对白是否简短自然，旁白是否与对白重复",
+        "不同分格对白是否套用同一开头或句式，是否只是复述本格动作而没有推进冲突",
         "是否存在明显事实冲突，或把不确定内容写成确定事实",
         "角色位置、气泡位置和负空间是否互相匹配",
     ]
-    payload = project.model_dump(mode="json", exclude={"output_path", "panel_images"})
+    payload = {
+        "title": project.title,
+        "theme": project.theme,
+        "story": project.story,
+        "content_language": project.content_language,
+        "characters": [
+            {
+                "name": item.name,
+                "role": item.role,
+                "appearance": item.appearance,
+                "personality": item.personality,
+            }
+            for item in project.characters
+        ],
+        "story_bible": project.story_bible.model_dump(mode="json"),
+        "panels": [
+            {
+                "sequence": item.sequence,
+                "scene": item.scene,
+                "visual_description": item.visual_description,
+                "characters": item.characters,
+                "action": item.action,
+                "dialogue": item.dialogue,
+                "narration": item.narration,
+                "narrative_role": item.narrative_role,
+                "text_items": [
+                    text.model_dump(
+                        mode="json",
+                        exclude={"speaker_anchor", "speaker_position"},
+                    )
+                    for text in item.text_items
+                ],
+            }
+            for item in project.panels
+        ],
+    }
     user_prompt = f"""下面是漫画初稿：
 {json.dumps(payload, ensure_ascii=False, indent=2)}
 
 请逐项审查：
 {json.dumps(requirements, ensure_ascii=False, indent=2)}
 
-先在内部完成审查，再直接输出修订后的完整 ComicProject JSON。保持 panel_count、theme、style、
-content_language、layout_mode、allow_multi_shot_panels 不变；更新 title_candidates、story_bible、
-角色、分镜、text_items 和 image_prompt；将关键修订理由写入
-review_notes，并设置 script_reviewed=true。不要输出审查过程或 JSON 之外的文字。
+先在内部完成审查，再只输出紧凑的 JSON 修订补丁，不要复述未修改内容。格式为：
+{{"project_patch": {{仅包含确实修改的 title、title_candidates、story、characters、
+story_bible 或 panels；panels 中每项必须包含 sequence，并只写该格的叙事或文字修改字段}},
+"review_notes": ["关键修订理由"], "script_reviewed": true}}。
+保持 panel_count、theme、style、content_language、layout_mode、allow_multi_shot_panels 不变。
+不要返回或修改 image_prompt、角色位置、气泡位置、构图和其他纯视觉布局字段；这些字段由程序
+从已经通过校验的初稿继承。没有需要修改的字段时 project_patch 使用空对象。
+不要输出审查过程、完整原项目或 JSON 之外的文字。
 """
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -326,7 +397,9 @@ content_language、layout_mode、allow_multi_shot_panels 不变；sequence 必�
 每格仍须具有不同叙事作用、清晰因果、
 适合静态画面的动作、简短气泡文字、角色位置、气泡预留区和完整 image_prompt。
 为避免结构化结果被截断，story 控制在 300 字以内；人物的每个文字字段控制在 80 字以内；
-每格 scene、visual_description 和 action 各控制在 100 字以内，image_prompt 控制在 220 字以内；
+每格 scene、visual_description、action 和 narrative_role 必须使用
+{LANGUAGE_NAMES[project.content_language]}，各控制在 100 字以内；image_prompt 只使用英文，
+控制在 45–80 个英文单词，并完整重申角色外观、场景、动作、构图、光线和画风；
 review_notes 最多 3 条。保持信息完整但不要重复同一事实或堆砌形容词。
 
 在输出 JSON 中把 user_story_guidance 设为空字符串；程序会在校验通过后安全写入用户原文，
@@ -374,13 +447,14 @@ def build_review_repair_messages(
 ) -> list[dict[str, str]]:
     """Repair a malformed review response without executing model output."""
     messages = build_story_review_messages(project)
-    messages.append({"role": "assistant", "content": invalid_output[:12000]})
     messages.append(
         {
             "role": "user",
             "content": (
                 f"修订稿无法通过结构校验：{error_message}\n"
-                "请只重新输出修复后的完整 JSON，字段不得省略。"
+                "不要复述或续写上一次输出。请从初稿重新审查，只输出合法的 "
+                "project_patch、review_notes 和 script_reviewed JSON；补丁中的分格必须"
+                "包含 sequence。"
             ),
         }
     )

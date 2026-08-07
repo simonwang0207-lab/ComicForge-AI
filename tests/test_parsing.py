@@ -9,6 +9,7 @@ from comicforge_ai.models.parsing import (
     extract_json_object,
     parse_comic_project,
     parse_comic_translation,
+    parse_reviewed_project,
 )
 from comicforge_ai.prompts.comic_translation import (
     build_comic_translation_messages,
@@ -35,6 +36,20 @@ def test_parses_and_validates_correct_project_json() -> None:
     assert len(project.panels) == 3
     assert project.panels[0].visual_description
     assert project.panels[0].image_prompt
+
+
+def test_repeated_dialogue_template_is_rejected_before_image_generation() -> None:
+    payload = comic_payload(4)
+    for index, panel in enumerate(payload["panels"], start=1):
+        panel["dialogue"] = f"龙王，今日我执行第{index}步！"
+
+    with pytest.raises(TextModelOutputError, match="对白重复使用同一开头"):
+        parse_comic_project(
+            json.dumps(payload, ensure_ascii=False),
+            theme="哪吒闹海",
+            style="水彩童话",
+            panel_count=4,
+        )
 
 
 def test_invalid_json_has_understandable_error() -> None:
@@ -89,6 +104,386 @@ def test_common_project_field_aliases_are_normalized_before_validation() -> None
 
     assert project.story == payload["summary"]
     assert project.characters[0].name == "小满"
+
+
+def test_missing_panel_sequence_is_inferred_from_array_order() -> None:
+    payload = comic_payload(3)
+    for panel in payload["panels"]:
+        del panel["sequence"]
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="顺序补全",
+        style="清新漫画",
+        panel_count=3,
+    )
+
+    assert [panel.sequence for panel in project.panels] == [1, 2, 3]
+
+
+def test_compact_panel_payload_inherits_safe_schema_defaults() -> None:
+    payload = comic_payload(1)
+    payload["panels"] = [
+        {
+            "sequence": 1,
+            "scene": "雨天的街道",
+            "image_prompt": "wide shot, a child crossing a rainy street",
+            "text_items": [{"type": "sfx", "text": "沙沙"}],
+        }
+    ]
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="精简分镜",
+        style="清新漫画",
+        panel_count=1,
+    )
+
+    panel = project.panels[0]
+    assert panel.scene == "雨天的街道"
+    assert panel.visual_description == panel.scene
+    assert panel.characters == []
+    assert panel.action == panel.dialogue == panel.narration == ""
+
+
+def test_common_panel_field_aliases_are_normalized() -> None:
+    payload = comic_payload(1)
+    payload["panels"] = [
+        {
+            "panel_number": 1,
+            "setting": "雨后的街道",
+            "description": "孩子撑伞走过斑马线",
+            "character_names": ["小满"],
+            "actions": "小心看向两侧",
+            "speech": "现在可以走了。",
+            "caption": "雨渐渐停了。",
+            "prompt": "wide comic shot, child crossing a rainy street",
+        }
+    ]
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="字段别名",
+        style="清新漫画",
+        panel_count=1,
+    )
+
+    panel = project.panels[0]
+    assert panel.scene == "雨后的街道"
+    assert panel.visual_description == "孩子撑伞走过斑马线"
+    assert panel.characters == ["小满"]
+    assert panel.dialogue == "现在可以走了。"
+    assert panel.narration == "雨渐渐停了。"
+
+
+def test_compact_provider_panel_does_not_confuse_composition_with_scene() -> None:
+    payload = {
+        "title": "哪吒闹海",
+        "story": "哪吒保护陈塘关。",
+        "characters": [
+            {
+                "name": "哪吒",
+                "role": "主角",
+                "appearance": "红袍金发",
+                "personality": "勇敢",
+                "visual_prompt": "Chinese boy, red robe, golden hair, fire wheel",
+            },
+            {
+                "name": "敖丙",
+                "role": "对手",
+                "appearance": "蓝色龙鳞甲",
+                "personality": "骄傲",
+                "visual_prompt": "dragon prince, blue scales, long spear",
+            },
+        ],
+        "panels": [
+            {
+                "sequence": 1,
+                "composition": "single",
+                "scene": "暴风雨中的海岸",
+                "image_prompt": (
+                    "Chinese boy in a red robe with golden hair riding a fire wheel "
+                    "above a stormy coastline"
+                ),
+                "text_items": [
+                    {"type": "speech", "speaker": "哪吒", "text": "我来保护大家！"}
+                ],
+                "character_positions": {"哪吒": "bottom_right"},
+            },
+            {
+                "sequence": 2,
+                "composition": "single",
+                "scene": "海浪上的对峙",
+                "image_prompt": "dragon prince with blue scales and a long spear on a wave",
+                "text_items": [
+                    {"type": "speech", "speaker": "敖丙", "text": "接受挑战！"}
+                ],
+                "character_positions": {"哪吒": "bottom_right"},
+            },
+        ],
+    }
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="哪吒闹海",
+        style="清新治愈",
+        panel_count=2,
+    )
+
+    assert project.panels[0].scene == "暴风雨中的海岸"
+    assert project.panels[0].visual_description == project.panels[0].scene
+    assert project.panels[0].characters == ["哪吒"]
+    assert project.panels[1].characters == ["敖丙"]
+    assert project.panels[1].character_positions == {}
+
+
+def test_chinese_project_replaces_mixed_english_display_fields_but_keeps_prompt() -> None:
+    payload = comic_payload(1)
+    payload["panels"][0]["scene"] = "天空中，哪吒与敖丙对决"
+    payload["panels"][0]["visual_description"] = (
+        "High angle shot of which吒 flying while敖丙 raises a long spear"
+    )
+    payload["panels"][0]["action"] = "Which吒 dodges waves while敖丙 attacks"
+    payload["panels"][0]["image_prompt"] = (
+        "High angle shot of Nezha dodging waves while Ao Bing attacks"
+    )
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="哪吒闹海",
+        style="清新治愈",
+        panel_count=1,
+        language="zh-CN",
+    )
+
+    panel = project.panels[0]
+    assert panel.visual_description == panel.scene
+    assert panel.action == ""
+    assert panel.image_prompt == payload["panels"][0]["image_prompt"]
+
+
+def test_draft_without_any_comic_text_is_rejected_for_repair() -> None:
+    payload = comic_payload(2)
+    for panel in payload["panels"]:
+        panel["dialogue"] = ""
+        panel["narration"] = ""
+        panel["text_items"] = []
+
+    with pytest.raises(TextModelOutputError, match="所有分格.*均为空"):
+        parse_comic_project(
+            json.dumps(payload, ensure_ascii=False),
+            theme="必须有漫画文字",
+            style="清新治愈",
+            panel_count=2,
+        )
+
+
+def test_chinese_project_rejects_english_visible_comic_text() -> None:
+    payload = comic_payload(2)
+    payload["panels"][0]["dialogue"] = "I will protect everyone!"
+    payload["panels"][0]["text_items"] = [
+        {
+            "type": "speech",
+            "speaker": "小满",
+            "text": "I will protect everyone!",
+        }
+    ]
+
+    with pytest.raises(
+        TextModelOutputError,
+        match="第 1 格.*未使用项目内容语言 zh-CN",
+    ):
+        parse_comic_project(
+            json.dumps(payload, ensure_ascii=False),
+            theme="中文台词校验",
+            style="清新漫画",
+            panel_count=2,
+            language="zh-CN",
+        )
+
+
+def test_user_story_recovers_wrong_language_panels_and_empty_lettering() -> None:
+    payload = comic_payload(4)
+    for index, panel in enumerate(payload["panels"], start=1):
+        panel["scene"] = f"English scene {index}"
+        panel["visual_description"] = f"English visual description {index}"
+        panel["action"] = f"English action {index}"
+        panel["dialogue"] = ""
+        panel["narration"] = ""
+        panel["text_items"] = []
+    source_story = (
+        "哪吒发现海边出现巨浪。巡海夜叉掀翻渔船。"
+        "哪吒踩着风火轮迎战。百姓最终恢复平静。"
+    )
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="哪吒闹海",
+        style="清新治愈",
+        panel_count=4,
+        language="zh-CN",
+        source_story=source_story,
+    )
+
+    assert all("\u4e00" <= panel.scene[0] <= "\u9fff" for panel in project.panels)
+    assert all(panel.visual_description == panel.scene for panel in project.panels)
+    assert all(panel.narration for panel in project.panels)
+    assert all(panel.text_items for panel in project.panels)
+    assert [panel.image_prompt for panel in project.panels] == [
+        panel["image_prompt"] for panel in payload["panels"]
+    ]
+
+
+def test_review_story_bible_object_lists_are_normalized_to_strings() -> None:
+    draft = MockTextModel().generate_project("故事圣经对象列表", "清新漫画", 2)
+    payload = {"project_patch": {}}
+    payload["project_patch"]["story_bible"] = {
+        "timeline": [
+            {"sequence": 1, "event": "主角发现线索"},
+            {"sequence": 2, "description": "主角解决问题"},
+        ],
+        "key_objects": [
+            {"name": "关键钥匙"},
+            {"item": "旧地图"},
+        ],
+    }
+
+    reviewed = parse_reviewed_project(
+        json.dumps(payload, ensure_ascii=False),
+        draft,
+    )
+
+    assert reviewed.story_bible.timeline == ["主角发现线索", "主角解决问题"]
+    assert reviewed.story_bible.key_objects == ["关键钥匙", "旧地图"]
+
+
+def test_review_panel_character_objects_are_normalized_to_names() -> None:
+    draft = MockTextModel().generate_project("角色对象引用", "清新漫画", 2)
+    payload = {"project_patch": {"panels": []}}
+    for panel in draft.panels:
+        payload["project_patch"]["panels"].append(
+            {
+                "sequence": panel.sequence,
+                "characters": [{"name": name} for name in panel.characters],
+            }
+        )
+
+    reviewed = parse_reviewed_project(
+        json.dumps(payload, ensure_ascii=False),
+        draft,
+    )
+
+    assert [panel.characters for panel in reviewed.panels] == [
+        panel.characters for panel in draft.panels
+    ]
+
+
+def test_review_position_aliases_are_normalized_before_validation() -> None:
+    draft = MockTextModel().generate_project("审查位置别名", "清新漫画", 2)
+    payload = {
+        "project_patch": {
+            "panels": [
+                {
+                    "sequence": 1,
+                    "character_positions": {"小漫": "center"},
+                    "reserved_bubble_regions": ["upper_left", "右上"],
+                }
+            ]
+        }
+    }
+
+    reviewed = parse_reviewed_project(
+        json.dumps(payload, ensure_ascii=False),
+        draft,
+    )
+
+    assert reviewed.panels[0].character_positions["小漫"] == "top_center"
+    assert reviewed.panels[0].reserved_bubble_regions == [
+        "top_left",
+        "top_right",
+    ]
+
+
+def test_unknown_review_character_position_inherits_validated_draft_value() -> None:
+    draft = MockTextModel().generate_project("审查位置回退", "清新漫画", 2)
+    draft.panels[0].character_positions = {"小漫": "bottom_right"}
+    payload = {
+        "project_patch": {
+            "panels": [
+                {
+                    "sequence": 1,
+                    "character_positions": {"小漫": "near_the_camera"},
+                }
+            ]
+        }
+    }
+
+    reviewed = parse_reviewed_project(
+        json.dumps(payload, ensure_ascii=False),
+        draft,
+    )
+
+    assert reviewed.panels[0].character_positions == {"小漫": "bottom_right"}
+
+
+def test_panel_index_alias_is_normalized_to_sequence() -> None:
+    payload = comic_payload(2)
+    for panel in payload["panels"]:
+        panel["index"] = panel.pop("sequence")
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="序号别名",
+        style="清新漫画",
+        panel_count=2,
+    )
+
+    assert [panel.sequence for panel in project.panels] == [1, 2]
+
+
+def test_missing_draft_title_uses_user_theme_without_inventing_story() -> None:
+    payload = comic_payload(1)
+    del payload["title"]
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="一只猫第一次坐地铁",
+        style="清新漫画",
+        panel_count=1,
+    )
+
+    assert project.title == "一只猫第一次坐地铁"
+    assert project.story == payload["story"]
+
+
+def test_missing_review_title_inherits_validated_draft_title() -> None:
+    draft = MockTextModel().generate_project("保留标题", "清新漫画", 1)
+    payload = draft.model_dump(mode="json")
+    del payload["title"]
+
+    reviewed = parse_reviewed_project(
+        json.dumps(payload, ensure_ascii=False),
+        draft,
+    )
+
+    assert reviewed.title == draft.title
+
+
+def test_partial_review_inherits_wholly_omitted_story_and_characters() -> None:
+    draft = MockTextModel().generate_project("保留故事与角色", "清新漫画", 2)
+    payload = {
+        "title": draft.title,
+        "panels": [panel.model_dump(mode="json") for panel in draft.panels],
+        "review_notes": ["只修改了分镜。"],
+    }
+
+    reviewed = parse_reviewed_project(
+        json.dumps(payload, ensure_ascii=False),
+        draft,
+    )
+
+    assert reviewed.story == draft.story
+    assert reviewed.characters == draft.characters
 
 
 def test_truncated_json_reports_output_length_advice() -> None:

@@ -40,6 +40,22 @@ def _request(**changes: object) -> ImageGenerationRequest:
     return ImageGenerationRequest(**values)
 
 
+def test_recraft_and_comfyui_use_isolated_prompt_profiles() -> None:
+    recraft = RecraftImageProvider(
+        api_key="placeholder",
+        model="recraftv4_1",
+    )
+    comfyui = ComfyUIImageProvider(
+        base_url="http://127.0.0.1:8188",
+        workflow={"6": {"inputs": {"text": "old"}}},
+        prompt_node_id="6",
+    )
+
+    assert recraft.get_prompt_profile() == "rich_localized"
+    assert comfyui.get_prompt_profile() == "sd_comfyui"
+    assert recraft.get_prompt_profile() != comfyui.get_prompt_profile()
+
+
 @pytest.mark.parametrize(
     ("provider_class", "expected_key"),
     [
@@ -203,7 +219,14 @@ def test_comfyui_prompt_history_polling_and_download(tmp_path: Path) -> None:
     workflow = {
         "6": {"inputs": {"text": "old"}},
         "5": {"inputs": {"width": 1, "height": 1}},
-        "3": {"inputs": {"seed": 1}},
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {"seed": 1, "negative": ["7", 0]},
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "old negative"},
+        },
     }
     submitted: dict[str, object] = {}
 
@@ -245,14 +268,232 @@ def test_comfyui_prompt_history_polling_and_download(tmp_path: Path) -> None:
         max_retries=0,
         poll_interval=0,
     )
-    result = provider.generate(_request(seed=77), tmp_path / "panel.png")
+    result = provider.generate(
+        _request(seed=77, negative_prompt="collage, text"),
+        tmp_path / "panel.png",
+    )
     sent_workflow = submitted["prompt"]
 
     assert sent_workflow["6"]["inputs"]["text"] == _request().prompt
     assert sent_workflow["5"]["inputs"]["width"] == 1024
     assert sent_workflow["5"]["inputs"]["height"] == 1024
     assert sent_workflow["3"]["inputs"]["seed"] == 77
+    assert sent_workflow["7"]["inputs"]["text"] == "collage, text"
+    assert provider.get_capabilities().negative_prompt is True
     assert result.request_id == "prompt-1"
+
+
+def test_comfyui_uploads_reference_and_replaces_ipadapter_load_image(
+    tmp_path: Path,
+) -> None:
+    reference = tmp_path / "character.png"
+    reference.write_bytes(_png_bytes("#ee8844"))
+    workflow = {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {"seed": 1, "negative": ["7", 0]},
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"width": 1024, "height": 1024},
+        },
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "old"}},
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": "old negative"},
+        },
+        "13": {
+            "class_type": "IPAdapterAdvanced",
+            "inputs": {"image": ["14", 0]},
+        },
+        "14": {
+            "class_type": "LoadImage",
+            "inputs": {"image": "workflow-default.png"},
+        },
+    }
+    submitted: dict[str, object] = {}
+    uploaded: dict[str, object] = {}
+
+    def upload_transport(*args: object) -> dict[str, object]:
+        uploaded["url"] = args[0]
+        uploaded["data"] = args[2]
+        uploaded["files"] = args[3]
+        return {"name": "uploaded-reference.png", "subfolder": "comicforge"}
+
+    def transport(*args: object) -> dict[str, object]:
+        if str(args[0]) == "POST":
+            submitted.update(args[3])  # type: ignore[arg-type]
+            return {"prompt_id": "prompt-reference"}
+        return {
+            "prompt-reference": {
+                "outputs": {
+                    "9": {
+                        "images": [
+                            {
+                                "filename": "out.png",
+                                "subfolder": "",
+                                "type": "output",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+    provider = ComfyUIImageProvider(
+        base_url="http://127.0.0.1:8188",
+        workflow=workflow,
+        prompt_node_id="6",
+        width_node_id="5",
+        height_node_id="5",
+        seed_node_id="3",
+        transport=transport,
+        upload_transport=upload_transport,
+        download_transport=lambda *args: _png_bytes(),
+        max_retries=0,
+        poll_interval=0,
+    )
+    result = provider.edit(
+        _request(reference_images=[reference], seed=77),
+        tmp_path / "panel.png",
+    )
+
+    sent_workflow = submitted["prompt"]
+    files = uploaded["files"]
+    assert provider.reference_image_node_id == "14"
+    assert provider.get_capabilities().image_to_image is True
+    assert uploaded["url"] == "http://127.0.0.1:8188/upload/image"
+    assert files[0][0] == "image"
+    assert files[0][1][1] == reference.read_bytes()
+    assert sent_workflow["14"]["inputs"]["image"] == (
+        "comicforge/uploaded-reference.png"
+    )
+    assert result.operation == "edit"
+    assert result.actual_parameters["reference_count"] == 1
+
+
+def test_comfyui_bypasses_ipadapter_when_no_reference_is_selected() -> None:
+    workflow = {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {"model": ["13", 0]},
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "animagine-xl-4.0-opt.safetensors"},
+        },
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "old"}},
+        "12": {
+            "class_type": "IPAdapterUnifiedLoader",
+            "inputs": {"model": ["4", 0]},
+        },
+        "13": {
+            "class_type": "IPAdapterAdvanced",
+            "inputs": {"model": ["12", 0], "image": ["14", 0]},
+        },
+        "14": {
+            "class_type": "LoadImage",
+            "inputs": {"image": "cat-example.png"},
+        },
+    }
+    provider = ComfyUIImageProvider(
+        base_url="http://127.0.0.1:8188",
+        workflow=workflow,
+        prompt_node_id="6",
+    )
+
+    sent_workflow = provider._build_workflow(
+        _request(width=None, height=None),
+    )
+
+    assert sent_workflow["3"]["inputs"]["model"] == ["4", 0]
+    assert sent_workflow["14"]["inputs"]["image"] == "cat-example.png"
+
+
+def test_comfyui_detects_animagine_checkpoint_and_uses_sdxl_sizes() -> None:
+    workflow = {
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "animagine-xl-4.0-opt.safetensors"},
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"width": 1024, "height": 1024},
+        },
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "old"}},
+    }
+
+    provider = ComfyUIImageProvider(
+        base_url="http://127.0.0.1:8188",
+        workflow=workflow,
+        prompt_node_id="6",
+        width_node_id="5",
+        height_node_id="5",
+    )
+
+    assert provider.checkpoint_name == "animagine-xl-4.0-opt.safetensors"
+    assert provider.get_prompt_profile() == "animagine_xl"
+    assert provider.preferred_generation_size(1.0) == (1024, 1024)
+    assert provider.preferred_generation_size(1.5) == (1216, 832)
+    assert provider.preferred_generation_size(2.5) == (1536, 640)
+
+
+def test_comfyui_replaces_workflow_seed_when_request_is_automatic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow = {
+        "6": {"inputs": {"text": "old"}},
+        "3": {"inputs": {"seed": 282832678669185}},
+    }
+    submitted: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "comicforge_ai.models.comfyui_image.secrets.randbelow",
+        lambda upper: 700,
+    )
+
+    def transport(*args: object) -> dict[str, object]:
+        method = str(args[0])
+        if method == "POST":
+            submitted.update(args[3])  # type: ignore[arg-type]
+            return {"prompt_id": "prompt-auto-seed"}
+        return {
+            "prompt-auto-seed": {
+                "outputs": {
+                    "9": {
+                        "images": [
+                            {
+                                "filename": "out.png",
+                                "subfolder": "",
+                                "type": "output",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+    provider = ComfyUIImageProvider(
+        base_url="http://127.0.0.1:8188",
+        workflow=workflow,
+        prompt_node_id="6",
+        seed_node_id="3",
+        transport=transport,
+        download_transport=lambda *args: _png_bytes(),
+        max_retries=0,
+        poll_interval=0,
+    )
+
+    result = provider.generate(
+        _request(seed=None, width=None, height=None),
+        tmp_path / "panel.png",
+    )
+    sent_workflow = submitted["prompt"]
+
+    assert sent_workflow["3"]["inputs"]["seed"] == 701
+    assert result.seed == 701
+    assert result.actual_parameters["seed"] == 701
 
 
 def test_openai_edit_uses_multiple_references_and_mask(tmp_path: Path) -> None:

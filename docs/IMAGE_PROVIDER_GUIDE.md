@@ -21,7 +21,7 @@ API Key 只能放在本机进程环境变量或被 Git 忽略的 `.env` 中。�
 | Together | 是 | 否 | 否 | 否 | 是 | 是 | 是 | 否 | 是 |
 | SiliconFlow | 是 | 是 | 最多 3 张 | 否 | 是 | 是 | 是 | 否 | 是 |
 | fal | 是 | 否 | 否 | 否 | 否 | 是 | 是 | 是 | 是 |
-| ComfyUI | 是 | 取决于 workflow（当前统一入口只声明文生图） | 否 | 否 | 否 | 取决于节点映射 | 否 | 是 | 取决于节点映射 |
+| ComfyUI | 是 | 取决于 workflow；当前支持单参考图上传/IPAdapter 替换 | 否 | 否 | 取决于节点映射 | 取决于节点映射 | 否 | 是 | 取决于节点映射 |
 
 能力由 Provider 返回，页面据此启用或禁用参数。不支持的参数在服务请求前抛出
 `UnsupportedCapabilityError`，不会被静默丢弃。
@@ -114,17 +114,21 @@ FAL_BASE_URL=https://queue.fal.run
 
 ```dotenv
 COMFYUI_BASE_URL=http://127.0.0.1:8188
-COMFYUI_WORKFLOW_PATH=C:\path\to\workflow_api.json
-COMFYUI_MODEL=comfyui-workflow
+COMFYUI_WORKFLOW_PATH=workflows/comfyui_text2img_api.json
+COMFYUI_MODEL=animagine-xl-4.0-ipadapter
 COMFYUI_PROMPT_NODE_ID=6
-COMFYUI_WIDTH_NODE_ID=
-COMFYUI_HEIGHT_NODE_ID=
-COMFYUI_SEED_NODE_ID=
+COMFYUI_WIDTH_NODE_ID=5
+COMFYUI_HEIGHT_NODE_ID=5
+COMFYUI_SEED_NODE_ID=3
+COMFYUI_NEGATIVE_PROMPT_NODE_ID=
+COMFYUI_REFERENCE_IMAGE_NODE_ID=
 ```
 
 workflow 必须是 ComfyUI “API format” JSON。程序复制 workflow 后写入配置的
-提示词/尺寸/Seed 节点，`POST /prompt`，轮询 `/history/{prompt_id}`，再通过
-`/view` 下载输出；不会修改源 workflow。协议：
+提示词/尺寸/Seed 节点；可上传一张参考图并替换 IPAdapter 的 `LoadImage` 输入；
+随后 `POST /prompt`，轮询 `/history/{prompt_id}`，再通过 `/view` 下载输出，
+不会修改源 workflow。当前工作区已有 SD1.5 512×512 严格单图和后续无回退项目记录；
+更换 checkpoint 或 workflow 后仍需重新验收。协议：
 [ComfyUI Server Routes](https://docs.comfy.org/development/comfyui-server/comms_routes)。
 
 ## 单图真实验收
@@ -141,6 +145,11 @@ workflow 必须是 ComfyUI “API format” JSON。程序复制 workflow 后写�
 脚本默认严格模式，不会回退 Mock。成功时只输出 Provider、模型、耗时、
 `request_id`、本地图片路径、尺寸和回退状态，绝不输出 Key。自动化测试全部
 使用注入的 HTTP Mock；真实付费请求只应由用户主动运行该脚本或在页面生成。
+
+当前真实验收边界：Recraft 已完成多次真实生图；ComfyUI 已完成严格本地生图；
+SiliconFlow 已完成国际站鉴权和模型列表验证，但因余额为 0 尚未真实收费生图；
+OpenAI Images、Together 和 fal 尚未配置或真实验收。实现或自动化测试通过不等于
+真实平台验收。
 
 ## P1 边界
 

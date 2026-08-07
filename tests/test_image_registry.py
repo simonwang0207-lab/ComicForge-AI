@@ -48,3 +48,11 @@ def test_default_image_registry_reads_environment_configuration() -> None:
 def test_image_registry_rejects_duplicate_provider_ids() -> None:
     with pytest.raises(ValueError, match="图片模型 ID 重复"):
         ImageProviderRegistry([MockImageModel(), MockImageModel()])
+
+
+def test_configured_provider_choices_hide_missing_credentials() -> None:
+    registry = build_default_image_registry({})
+
+    assert [
+        value for _, value in registry.configured_provider_choices()
+    ] == ["mock-image"]

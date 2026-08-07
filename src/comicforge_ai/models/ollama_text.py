@@ -12,6 +12,7 @@ from comicforge_ai.models.base import (
     TextModelNotFoundError,
     TextModelOutputError,
     TextModelRequestError,
+    TextModelResourceReleaseStatus,
     TextModelStatus,
 )
 from comicforge_ai.models.http import HttpTimeout, HttpTransport, request_json
@@ -37,6 +38,7 @@ class OllamaTextModel(RemoteTextModelProvider):
         model: str,
         connect_timeout: float = 10,
         generation_timeout: float = 300,
+        review_timeout: float = 90,
         status_timeout: float = 10,
         num_predict: int = 4096,
         num_ctx: int = 8192,
@@ -53,6 +55,7 @@ class OllamaTextModel(RemoteTextModelProvider):
             generation_timeout = timeout
         self.connect_timeout = max(0.1, connect_timeout)
         self.generation_timeout = max(0.1, generation_timeout)
+        self.review_timeout = max(0.1, review_timeout)
         self.status_timeout = max(0.1, status_timeout)
         self.num_predict = max(1024, int(num_predict))
         self.num_ctx = max(4096, int(num_ctx))
@@ -131,10 +134,76 @@ class OllamaTextModel(RemoteTextModelProvider):
             message=message,
         )
 
+    def release_resources(self) -> TextModelResourceReleaseStatus:
+        """Ask Ollama to unload this model without disrupting the workflow."""
+        if not self.base_url or not self._model_name:
+            return TextModelResourceReleaseStatus(
+                attempted=False,
+                released=False,
+                message="Ollama 未配置，无需释放显存",
+            )
+        started = time.perf_counter()
+        try:
+            self.transport(
+                "POST",
+                f"{self.base_url}/api/generate",
+                {},
+                {
+                    "model": self._model_name,
+                    "keep_alive": 0,
+                    "stream": False,
+                },
+                HttpTimeout(
+                    connect=self.connect_timeout,
+                    read=self.status_timeout,
+                ),
+            )
+        except TextModelRequestError as exc:
+            elapsed = time.perf_counter() - started
+            logger.warning(
+                "Unable to release Ollama model resources: model=%s "
+                "elapsed=%.2fs exception_type=%s",
+                self._model_name,
+                elapsed,
+                type(exc).__name__,
+            )
+            return TextModelResourceReleaseStatus(
+                attempted=True,
+                released=False,
+                message=f"Ollama 显存释放失败：{type(exc).__name__}",
+                elapsed_seconds=elapsed,
+            )
+        elapsed = time.perf_counter() - started
+        logger.info(
+            "Ollama model resources released: model=%s elapsed=%.2fs",
+            self._model_name,
+            elapsed,
+        )
+        return TextModelResourceReleaseStatus(
+            attempted=True,
+            released=True,
+            message=f"已释放 Ollama 模型 {self._model_name} 的显存占用",
+            elapsed_seconds=elapsed,
+        )
+
     def _chat(self, messages: list[dict[str, str]]) -> str:
+        return self._chat_with_timeout(messages, self.generation_timeout)
+
+    def _chat_for_review(self, messages: list[dict[str, str]]) -> str:
+        return self._chat_with_timeout(messages, self.review_timeout)
+
+    def _chat_with_timeout(
+        self,
+        messages: list[dict[str, str]],
+        read_timeout: float,
+    ) -> str:
         self.last_thinking_control = "api_think_false"
         try:
-            response = self._send_chat(messages, include_think=False)
+            response = self._send_chat(
+                messages,
+                include_think=False,
+                read_timeout=read_timeout,
+            )
         except TextModelHttpError as exc:
             if self._is_model_not_found(exc):
                 raise self._model_not_found_error(exc) from exc
@@ -152,6 +221,7 @@ class OllamaTextModel(RemoteTextModelProvider):
                 response = self._send_chat(
                     add_no_think_directive(messages),
                     include_think=None,
+                    read_timeout=read_timeout,
                 )
             except TextModelHttpError as retry_exc:
                 if self._is_model_not_found(retry_exc):
@@ -181,6 +251,7 @@ class OllamaTextModel(RemoteTextModelProvider):
                 include_think=include_think,
                 num_predict=retry_num_predict,
                 num_ctx=retry_num_ctx,
+                read_timeout=read_timeout,
             )
             if str(response.get("done_reason", "")).lower() == "length":
                 raise TextModelOutputError(
@@ -200,6 +271,7 @@ class OllamaTextModel(RemoteTextModelProvider):
         include_think: bool | None,
         num_predict: int | None = None,
         num_ctx: int | None = None,
+        read_timeout: float | None = None,
     ) -> dict[str, Any]:
         actual_num_predict = num_predict or self.num_predict
         actual_num_ctx = num_ctx or self.num_ctx
@@ -226,7 +298,7 @@ class OllamaTextModel(RemoteTextModelProvider):
                 payload,
                 HttpTimeout(
                     connect=self.connect_timeout,
-                    read=self.generation_timeout,
+                    read=read_timeout or self.generation_timeout,
                 ),
             )
         except TextModelRequestError as exc:

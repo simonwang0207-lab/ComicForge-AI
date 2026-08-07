@@ -1,7 +1,15 @@
-from comicforge_ai.ui import _APP_CSS, create_demo
+from comicforge_ai.models import MockTextModel
+from comicforge_ai.service import ComicGenerator
+from comicforge_ai.ui import (
+    _APP_CSS,
+    _storyboard_rows,
+    create_demo,
+    regenerate_panel_for_ui,
+    restore_panel_version_for_ui,
+)
 
 
-def test_workspace_registers_fit_and_width_preview_modes() -> None:
+def test_workspace_registers_scrollable_fullscreen_preview() -> None:
     config = create_demo().get_config_file()
     components = config["components"]
 
@@ -10,22 +18,22 @@ def test_workspace_registers_fit_and_width_preview_modes() -> None:
         for item in components
         if item.get("props", {}).get("elem_id") == "comic-preview"
     )
-    view_mode = next(
-        item
-        for item in components
-        if item.get("props", {}).get("label") == "预览方式"
-    )
     scripts = [item.get("js") or "" for item in config["dependencies"]]
     component_ids = {
         item.get("props", {}).get("elem_id") for item in components
     }
 
     assert preview["props"]["elem_classes"] == ["cf-preview-fit"]
-    assert view_mode["props"]["choices"] == [
-        ("整页预览", "fit"),
-        ("放大阅读", "width"),
-    ]
-    assert any("cf-preview-width" in script for script in scripts)
+    assert all(
+        item.get("props", {}).get("label") != "预览方式"
+        for item in components
+    )
+    assert all("cf-preview-width" not in script for script in scripts)
+    assert any("requestFullscreen" in script for script in scripts)
+    assert any("addEventListener('wheel'" in script for script in scripts)
+    assert any("addEventListener('pointermove'" in script for script in scripts)
+    assert any("addEventListener('dblclick'" in script for script in scripts)
+    assert "cf-fullscreen-button" in component_ids
     assert all(
         item.get("props", {}).get("label") != "界面" for item in components
     )
@@ -33,7 +41,6 @@ def test_workspace_registers_fit_and_width_preview_modes() -> None:
         "cf-flow-heading",
         "cf-flow-note",
         "cf-canvas-heading",
-        "cf-preview-mode",
         "cf-preview-help",
         "cf-revision-heading",
     }.issubset(component_ids)
@@ -49,9 +56,9 @@ def test_workspace_registers_fit_and_width_preview_modes() -> None:
     assert "Negative prompt" not in labels
     assert "Seed（0/空表示随机）" not in labels
     assert labels["不希望画面出现的内容"]["visible"] is False
-    assert labels["固定随机结果"]["visible"] is False
-    assert labels["角色或画风参考图（可多选）"]["visible"] is False
-    assert labels["局部修改范围图（白色区域会被修改）"]["visible"] is False
+    assert labels["系统随机 Seed"]["visible"] is False
+    assert labels["单角色参考图"]["visible"] is False
+    assert labels["局部修改范围图"]["visible"] is False
 
     download_labels = {
         item.get("props", {}).get("label")
@@ -63,14 +70,16 @@ def test_workspace_registers_fit_and_width_preview_modes() -> None:
 
 def test_workspace_preview_uses_an_independent_viewport() -> None:
     assert "height: min(68vh, 820px)" in _APP_CSS
-    assert "#comic-preview.cf-preview-width img" in _APP_CSS
-    assert "overflow-y: auto" in _APP_CSS
+    assert "#comic-preview.cf-preview-width img" not in _APP_CSS
+    assert ".cf-canvas-shell:fullscreen" in _APP_CSS
+    assert ".cf-canvas-shell:fullscreen #comic-preview img" in _APP_CSS
+    assert "cursor: grab" in _APP_CSS
     assert ".cf-dark-mode" not in _APP_CSS
     assert "background: #f5f7fb" in _APP_CSS
     assert "#cf-flow-heading" in _APP_CSS
     assert "#cf-flow-note" in _APP_CSS
     assert "#cf-canvas-heading" in _APP_CSS
-    assert "#cf-preview-mode" in _APP_CSS
+    assert "#cf-preview-mode" not in _APP_CSS
     assert "#cf-preview-help" in _APP_CSS
     assert ".cf-canvas-shell .form" in _APP_CSS
     assert ".cf-canvas-shell > div" in _APP_CSS
@@ -79,3 +88,152 @@ def test_workspace_preview_uses_an_independent_viewport() -> None:
     assert ".cf-revision-card .form" in _APP_CSS
     assert "#cf-revision-heading" in _APP_CSS
     assert "--block-background-fill: #ffffff" in _APP_CSS
+
+
+def test_workspace_uses_side_settings_navigation_and_one_notice() -> None:
+    config = create_demo().get_config_file()
+    components = config["components"]
+    component_ids = [
+        item.get("props", {}).get("elem_id") for item in components
+    ]
+
+    assert {
+        "cf-project-summary",
+        "cf-open-content",
+        "cf-open-page",
+        "cf-open-models",
+        "cf-open-lettering",
+        "cf-settings-content",
+        "cf-settings-page",
+        "cf-settings-models",
+        "cf-settings-lettering",
+        "cf-global-notice",
+        "cf-open-advanced-settings",
+        "cf-advanced-settings-panel",
+        "cf-close-advanced-settings",
+    }.issubset(component_ids)
+    assert component_ids.count("cf-global-notice") == 1
+    assert ".cf-action-primary button" in _APP_CSS
+    assert ".cf-action-danger button" in _APP_CSS
+    assert ".cf-global-notice" in _APP_CSS
+    assert ".cf-advanced-settings" in _APP_CSS
+    assert ".cf-image-settings-trigger button" in _APP_CSS
+    assert ".cf-modal-close button" in _APP_CSS
+    assert "0 0 0 100vmax" in _APP_CSS
+    assert "max-height: 150px" not in _APP_CSS
+
+    scripts = [item.get("js") or "" for item in config["dependencies"]]
+    assert any("outsideHandler" in script for script in scripts)
+    assert any("event.key === 'Escape'" in script for script in scripts)
+
+    settings_button = next(
+        item
+        for item in components
+        if item.get("props", {}).get("elem_id") == "cf-open-advanced-settings"
+    )
+    image_model = next(
+        item
+        for item in components
+        if item.get("props", {}).get("label") == "具体图片模型"
+    )
+    fallback_provider = next(
+        item
+        for item in components
+        if item.get("props", {}).get("label") == "失败时备用图片服务"
+    )
+    assert settings_button["type"] == "button"
+    assert settings_button["props"]["value"] == "图片设置"
+    assert image_model["type"] == "radio"
+    assert fallback_provider["type"] == "radio"
+
+    labels = {
+        item.get("props", {}).get("label"): item
+        for item in components
+        if item.get("props", {}).get("label")
+    }
+    assert "回退到历史版本" in labels
+    assert any(
+        item.get("type") == "button"
+        and item.get("props", {}).get("value") == "↶ 恢复这一格的历史版本"
+        for item in components
+    )
+
+
+def test_storyboard_rows_prefer_chinese_review_text() -> None:
+    project = MockTextModel().generate_project("一只猫第一次坐地铁", "清新治愈", 1)
+    project.panels[0].visual_description = (
+        "Wide shot of a modern subway platform with a small orange cat"
+    )
+    project.panels[0].scene = "清晨的现代地铁站台"
+    project.panels[0].action = "小橘猫探头观察车门"
+
+    assert _storyboard_rows(project)[0][1] == "清晨的现代地铁站台；小橘猫探头观察车门"
+
+
+def test_storyboard_rows_do_not_treat_mixed_english_as_chinese() -> None:
+    project = MockTextModel().generate_project("哪吒闹海", "清新治愈", 1)
+    project.panels[0].scene = "天空中，哪吒与敖丙对决"
+    project.panels[0].visual_description = (
+        "High angle shot of which吒 flying while敖丙 raises a spear"
+    )
+    project.panels[0].action = "Which吒 dodges waves"
+
+    assert _storyboard_rows(project)[0][1] == "天空中，哪吒与敖丙对决"
+
+
+def test_panel_regeneration_and_restore_callbacks_return_fresh_preview(
+    tmp_path,
+) -> None:
+    generator = ComicGenerator(output_dir=tmp_path)
+    generated = generator.generate_with_status(
+        "前端单格版本",
+        "清新治愈",
+        2,
+        provider_id="mock",
+        image_provider_id="mock-image",
+    )
+    rows = _storyboard_rows(generated.project)
+
+    regenerated = regenerate_panel_for_ui(
+        generated.project.model_dump(mode="json"),
+        rows,
+        1,
+        "mock",
+        "mock-image",
+        "",
+        "",
+        "auto",
+        None,
+        "png",
+        None,
+        None,
+        False,
+        "",
+        "classic",
+        "immersive",
+        True,
+        False,
+        True,
+        generator,
+    )
+
+    assert regenerated[1] is not None
+    assert regenerated[3].endswith("comic.png")
+    assert "历史版本 v1" in regenerated[6]
+
+    restored = restore_panel_version_for_ui(
+        regenerated[0],
+        rows,
+        1,
+        1,
+        "classic",
+        "immersive",
+        True,
+        False,
+        True,
+        generator,
+    )
+
+    assert restored[1] is not None
+    assert restored[3].endswith("comic.png")
+    assert "已恢复到 v1" in restored[6]

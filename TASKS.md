@@ -68,7 +68,8 @@
 - [x] Implement Together Image Provider
 - [x] Implement SiliconFlow native `image_size`/`batch_size`/`images` protocol
 - [x] Implement fal queue submission, status polling, and result retrieval
-- [x] Implement ComfyUI workflow submission, history polling, and `/view` download
+- [x] Implement ComfyUI workflow submission, history polling, `/view` download,
+  and IPAdapter reference-image upload/replacement
 - [x] Build Provider/model registry metadata for dynamic Gradio controls
 - [x] Add advanced image settings, capability display, strict mode, and concurrency
 - [x] Add primary → secondary → Mock per-panel fallback chain
@@ -166,9 +167,50 @@
 
 - [x] Score bubble regions using image edge density
 - [ ] Extend placement scoring with subject/face detection and manual overrides
+- [x] Add per-panel manual lettering-position overrides in the storyboard editor
 - [ ] Add manual bubble dragging and per-panel position adjustment
-- [ ] Add single-panel regeneration
+- [x] Add single-panel regeneration
+- [x] Archive single-panel image revisions and allow reversible per-panel rollback
 - [x] Add irregular bubble outlines and rotated SFX
 - [ ] Add perspective SFX and selectable comic-lettering font packs
-- [ ] Add advanced character-reference workflows only for Providers that support them
-- [ ] Allow a separately selected script-review Provider
+- [x] Add an Animagine XL + IPAdapter character-reference workflow for ComfyUI
+- [x] Reuse the first generated subject panel as a ComfyUI reference when no upload is provided
+- [x] Restrict generic ComfyUI character references to single-character panels so story scenes keep their composition
+- [x] Normalize compact text-provider storyboards into a provider-independent panel contract before image generation
+- [x] Allow a separately selected script-review Provider
+
+## 2026-08-06 — Documentation archive and current acceptance
+
+- [x] Create the third-stage and post-stage progress archive in `docs/STAGE4_PROGRESS_REPORT.md`
+- [x] Create complete architecture, configuration, extension, and operations documentation
+- [x] Create a verified feature inventory and 2–3 minute Recraft Demo recording script
+- [x] Synchronize README Provider status without equating implementation, configuration, authentication, and real generation
+- [x] Record Recraft as real-generation accepted based on existing no-fallback output records
+- [x] Record ComfyUI as strict 512x512 single-image accepted and retain later no-fallback project evidence
+- [x] Record SiliconFlow international authentication and model-list validation separately from real generation
+- [ ] Complete a paid SiliconFlow image-generation acceptance after the account has usable balance
+- [ ] Configure and independently accept OpenAI Images, Together, and fal before marking them real-generation ready
+
+## Next priorities
+
+### P0 — Demo reliability
+
+- [ ] Fix the three current Ruff findings in `service.py` and `ui.py`, then rerun the full free verification suite
+- [ ] Add visible per-panel image queue/progress state and distinguish queued, running, downloading, and timed out
+- [ ] Add failed-panel resume that reuses successful panels instead of restarting the full page
+- [ ] Maintain a repeatable Recraft four-panel and ComfyUI strict smoke acceptance checklist
+- [ ] Continue provider-independent review normalization without weakening required first-draft fields
+- [x] Send a compact narrative-only review snapshot and separate review timeout from normal text generation
+
+### P1 — Quality and editing
+
+- [ ] Add manual bubble dragging and subject/face-aware placement
+- [ ] Add multi-character reference workflows, regional conditioning, or character LoRA support with measurable consistency tests
+- [ ] Complete and manually accept a multi-page UI, per-page editing, and whole-book export flow
+- [ ] Add perspective SFX and selectable lettering font packs
+
+### P2 — Deployment and provider expansion
+
+- [ ] Add authenticated task queues, user isolation, remote storage, and a controlled deployment path
+- [ ] Real-generation test each currently unaccepted cloud Provider with explicit user budget approval
+- [ ] Evaluate the unregistered Gemini, DashScope, Volcengine Ark, Replicate, and xAI candidates one at a time
