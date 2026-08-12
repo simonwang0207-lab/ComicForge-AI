@@ -9,6 +9,7 @@ from comicforge_ai.prompts.comic_generation import (
     build_story_guidance_repair_messages,
     build_story_guidance_revision_messages,
     build_story_review_messages,
+    build_visible_text_language_repair_messages,
 )
 from comicforge_ai.prompts.comic_translation import (
     build_comic_translation_messages,
@@ -38,4 +39,5 @@ __all__ = [
     "build_story_guidance_repair_messages",
     "build_story_guidance_revision_messages",
     "build_story_review_messages",
+    "build_visible_text_language_repair_messages",
 ]

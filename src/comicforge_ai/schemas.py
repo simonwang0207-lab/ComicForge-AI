@@ -309,6 +309,7 @@ class PanelImageRecord(BaseModel):
     error_summary: str = ""
     reference_source: str = ""
     reference_panel_sequence: int | None = Field(default=None, ge=1)
+    reference_character_names: list[str] = Field(default_factory=list)
 
 
 class PanelImageVersion(BaseModel):

@@ -63,6 +63,7 @@ class AutoReferenceImageProvider(MockImageModel):
     def __init__(self) -> None:
         super().__init__()
         self.reference_counts: list[int] = []
+        self.reference_names: list[tuple[str, ...]] = []
 
     def get_capabilities(self) -> ImageProviderCapabilities:
         return ImageProviderCapabilities(text_to_image=True, image_to_image=True)
@@ -73,6 +74,9 @@ class AutoReferenceImageProvider(MockImageModel):
         output_path: Path,
     ) -> ImageGenerationResult:
         self.reference_counts.append(len(request.reference_images))
+        self.reference_names.append(
+            tuple(path.name for path in request.reference_images)
+        )
         return super().generate(request, output_path)
 
     def edit(
@@ -81,6 +85,9 @@ class AutoReferenceImageProvider(MockImageModel):
         output_path: Path,
     ) -> ImageGenerationResult:
         self.reference_counts.append(len(request.reference_images))
+        self.reference_names.append(
+            tuple(path.name for path in request.reference_images)
+        )
         clean_request = request.model_copy(update={"reference_images": []})
         result = super().generate(clean_request, output_path)
         result.operation = "edit"
@@ -90,6 +97,17 @@ class AutoReferenceImageProvider(MockImageModel):
 class PortraitRestrictedImageProvider(AutoReferenceImageProvider):
     model_id = "portrait-restricted-image"
     restrict_reference_to_portrait_panels = True
+
+
+class MultiReferenceImageProvider(AutoReferenceImageProvider):
+    model_id = "multi-reference-image"
+
+    def get_capabilities(self) -> ImageProviderCapabilities:
+        return ImageProviderCapabilities(
+            text_to_image=True,
+            image_to_image=True,
+            multi_reference=True,
+        )
 
 
 class FailingLocalAcceleratorProvider(MockImageModel):
@@ -280,7 +298,7 @@ def test_user_reference_is_not_applied_to_panel_without_main_character(
     assert result.project.panel_images[1].reference_source == ""
 
 
-def test_comfyui_style_reference_applies_to_single_character_panels(
+def test_comfyui_reference_applies_to_single_character_panels_at_any_shot_size(
     tmp_path: Path,
 ) -> None:
     reference = tmp_path / "main-character.png"
@@ -313,6 +331,151 @@ def test_comfyui_style_reference_applies_to_single_character_panels(
         "user_upload",
         "",
     ]
+    assert [item.reference_character_names for item in result.project.panel_images] == [
+        [main_name],
+        [main_name],
+        [],
+    ]
+
+
+def test_uploaded_references_are_matched_by_story_bible_order(
+    tmp_path: Path,
+) -> None:
+    provider = PortraitRestrictedImageProvider()
+    generator = ComicGenerator(
+        image_registry=ImageProviderRegistry([MockImageModel(), provider]),
+        output_dir=tmp_path,
+        image_fallback_to_mock=False,
+    )
+    project = MockTextModel().generate_project("双角色参考", "漫画", 2)
+    first_name = project.characters[0].name
+    second_name = project.characters[1].name
+    project.panels[0].characters = [first_name]
+    project.panels[0].image_prompt = "medium shot portrait"
+    project.panels[1].characters = [second_name]
+    project.panels[1].image_prompt = "medium shot portrait"
+
+    first_reference = tmp_path / "reference-01.png"
+    second_reference = tmp_path / "reference-02.png"
+    Image.new("RGB", (32, 32), "#2244AA").save(first_reference)
+    Image.new("RGB", (32, 32), "#AA4422").save(second_reference)
+
+    result = generator.render_confirmed_project(
+        project,
+        "portrait-restricted-image",
+        ImageGenerationOptions(
+            reference_images=(first_reference, second_reference),
+            concurrency=1,
+        ),
+    )
+
+    assert provider.reference_names == [
+        (first_reference.name,),
+        (second_reference.name,),
+    ]
+    assert [record.reference_character_names for record in result.project.panel_images] == [
+        [first_name],
+        [second_name],
+    ]
+
+
+def test_comfyui_does_not_turn_first_story_panel_into_identity_reference() -> None:
+    assert ComfyUIImageProvider.auto_reference_from_first_panel is False
+
+
+def test_non_character_reference_source_keeps_other_provider_reference_lists(
+    tmp_path: Path,
+) -> None:
+    provider = MultiReferenceImageProvider()
+    generator = ComicGenerator(
+        image_registry=ImageProviderRegistry([MockImageModel(), provider]),
+        output_dir=tmp_path,
+        image_fallback_to_mock=False,
+    )
+    references = (tmp_path / "style-a.png", tmp_path / "style-b.png")
+    for index, reference in enumerate(references):
+        Image.new("RGB", (32, 32), (40 + index * 20, 60, 80)).save(reference)
+
+    generator.generate_with_status(
+        "保持其他图片服务的多参考图行为",
+        "漫画",
+        1,
+        provider_id="mock",
+        image_provider_id="multi-reference-image",
+        image_options=ImageGenerationOptions(
+            reference_images=references,
+            reference_source="style_reference",
+        ),
+    )
+
+    assert provider.reference_counts == [2]
+    assert provider.reference_names == [tuple(path.name for path in references)]
+
+
+def test_multi_reference_provider_selects_uploaded_characters_per_panel(
+    tmp_path: Path,
+) -> None:
+    provider = MultiReferenceImageProvider()
+    generator = ComicGenerator(
+        image_registry=ImageProviderRegistry([MockImageModel(), provider]),
+        output_dir=tmp_path,
+        image_fallback_to_mock=False,
+    )
+    project = MockTextModel().generate_project("双角色同框", "漫画", 3)
+    first_name = project.characters[0].name
+    second_name = project.characters[1].name
+    project.panels[0].characters = [first_name]
+    project.panels[1].characters = [second_name]
+    project.panels[2].characters = [first_name, second_name]
+
+    first_reference = tmp_path / "reference-01.png"
+    second_reference = tmp_path / "reference-02.png"
+    Image.new("RGB", (32, 32), "#2244AA").save(first_reference)
+    Image.new("RGB", (32, 32), "#AA4422").save(second_reference)
+
+    result = generator.render_confirmed_project(
+        project,
+        "multi-reference-image",
+        ImageGenerationOptions(
+            reference_images=(first_reference, second_reference),
+            concurrency=1,
+        ),
+    )
+
+    assert provider.reference_names == [
+        (first_reference.name,),
+        (second_reference.name,),
+        (first_reference.name, second_reference.name),
+    ]
+    assert [record.reference_character_names for record in result.project.panel_images] == [
+        [first_name],
+        [second_name],
+        [first_name, second_name],
+    ]
+
+
+def test_comfyui_style_reference_rejects_more_images_than_characters(
+    tmp_path: Path,
+) -> None:
+    provider = PortraitRestrictedImageProvider()
+    generator = ComicGenerator(
+        image_registry=ImageProviderRegistry([MockImageModel(), provider]),
+        output_dir=tmp_path,
+        image_fallback_to_mock=False,
+    )
+    references = tuple(tmp_path / f"reference-{index}.png" for index in range(3))
+    for reference in references:
+        Image.new("RGB", (32, 32), "#446688").save(reference)
+
+    with pytest.raises(ImageModelError, match="参考图数量超过项目角色数量"):
+        generator.generate_with_status(
+            "过多角色参考图",
+            "漫画",
+            1,
+            provider_id="mock",
+            image_provider_id="portrait-restricted-image",
+            image_options=ImageGenerationOptions(reference_images=references),
+        )
 
 
 def test_local_accelerator_stops_submitting_panels_after_first_failure(

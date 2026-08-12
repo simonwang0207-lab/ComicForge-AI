@@ -3,7 +3,11 @@ from comicforge_ai.service import ComicGenerator
 from comicforge_ai.ui import (
     _APP_CSS,
     _storyboard_rows,
+    append_reference_image_for_ui,
+    clear_reference_images_for_ui,
     create_demo,
+    reference_file_order_markdown,
+    reference_upload_guide,
     regenerate_panel_for_ui,
     restore_panel_version_for_ui,
 )
@@ -57,7 +61,15 @@ def test_workspace_registers_scrollable_fullscreen_preview() -> None:
     assert "Seed（0/空表示随机）" not in labels
     assert labels["不希望画面出现的内容"]["visible"] is False
     assert labels["系统随机 Seed"]["visible"] is False
-    assert labels["单角色参考图"]["visible"] is False
+    assert labels["有序角色参考图（可批量导入并拖动排序）"][
+        "allow_reordering"
+    ] is True
+    assert labels["有序角色参考图（可批量导入并拖动排序）"]["height"] == 300
+    assert "选择要调整顺序的图片" not in labels
+    assert labels["粘贴或导入一张参考图"]["sources"] == [
+        "clipboard",
+        "upload",
+    ]
     assert labels["局部修改范围图"]["visible"] is False
 
     download_labels = {
@@ -74,6 +86,8 @@ def test_workspace_preview_uses_an_independent_viewport() -> None:
     assert ".cf-canvas-shell:fullscreen" in _APP_CSS
     assert ".cf-canvas-shell:fullscreen #comic-preview img" in _APP_CSS
     assert "cursor: grab" in _APP_CSS
+    assert "#cf-reference-files .file-preview" in _APP_CSS
+    assert "overflow-y: auto !important" in _APP_CSS
     assert ".cf-dark-mode" not in _APP_CSS
     assert "background: #f5f7fb" in _APP_CSS
     assert "#cf-flow-heading" in _APP_CSS
@@ -121,6 +135,10 @@ def test_workspace_uses_side_settings_navigation_and_one_notice() -> None:
     assert ".cf-modal-close button" in _APP_CSS
     assert "0 0 0 100vmax" in _APP_CSS
     assert "max-height: 150px" not in _APP_CSS
+    assert "max-height: min(88dvh, 860px) !important" in _APP_CSS
+    assert "overflow-y: auto !important" in _APP_CSS
+    assert ".cf-advanced-settings > .styler" in _APP_CSS
+    assert "overflow: visible !important" in _APP_CSS
 
     scripts = [item.get("js") or "" for item in config["dependencies"]]
     assert any("outsideHandler" in script for script in scripts)
@@ -237,3 +255,68 @@ def test_panel_regeneration_and_restore_callbacks_return_fresh_preview(
     assert restored[1] is not None
     assert restored[3].endswith("comic.png")
     assert "已恢复到 v1" in restored[6]
+
+
+def test_reference_upload_guide_uses_story_bible_order() -> None:
+    project = MockTextModel().generate_project("双角色", "漫画", 2)
+
+    guide = reference_upload_guide(project.model_dump(mode="json"))
+
+    first = project.characters[0].name
+    second = project.characters[1].name
+    assert f"1. `{first}`" in guide
+    assert f"2. `{second}`" in guide
+    assert guide.index(first) < guide.index(second)
+    assert "文件名" not in guide
+    assert "多人同格会暂时停用参考图" in guide
+
+
+def test_clipboard_reference_is_appended_to_ordered_list() -> None:
+    ordered, cleared = append_reference_image_for_ui(
+        "second.png",
+        ["first.png"],
+    )
+
+    assert ordered == ["first.png", "second.png"]
+    assert cleared is None
+    assert clear_reference_images_for_ui() == (None, None)
+
+
+def test_empty_clipboard_reference_does_not_put_uploaders_in_error_state(
+    monkeypatch,
+) -> None:
+    warnings: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        "comicforge_ai.ui.gr.Warning",
+        lambda message, duration: warnings.append((message, duration)),
+    )
+
+    ordered, cleared = append_reference_image_for_ui(None, ["first.png"])
+
+    assert ordered == ["first.png"]
+    assert cleared is None
+    assert warnings == [("请先粘贴或导入一张角色参考图。", 3)]
+
+
+def test_actual_reference_file_order_is_visible_with_character_binding() -> None:
+    project = MockTextModel().generate_project("双角色", "漫画", 2)
+    state = project.model_dump(mode="json")
+
+    order = reference_file_order_markdown(
+        state,
+        ["C:/uploads/哪吒.jpg", "C:/uploads/敖丙.png"],
+    )
+
+    assert "#### 当前已导入顺序" in order
+    assert f"1. `哪吒.jpg` → **{project.characters[0].name}**" in order
+    assert f"2. `敖丙.png` → **{project.characters[1].name}**" in order
+    assert order.index("哪吒.jpg") < order.index("敖丙.png")
+
+
+def test_reference_upload_area_has_fixed_scrollable_height() -> None:
+    assert "#cf-reference-files" in _APP_CSS
+    assert "max-height: 320px !important" in _APP_CSS
+    assert "#cf-reference-files .file-preview-holder" in _APP_CSS
+    assert "min-height: 120px !important" in _APP_CSS
+    assert "#cf-reference-files .file-preview" in _APP_CSS
+    assert "overflow-y: auto !important" in _APP_CSS

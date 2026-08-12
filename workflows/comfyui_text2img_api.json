@@ -119,11 +119,11 @@
   },
   "13": {
     "inputs": {
-      "weight": 0.2,
+      "weight": 0.35,
       "weight_type": "linear",
       "combine_embeds": "concat",
       "start_at": 0,
-      "end_at": 0.5,
+      "end_at": 0.65,
       "embeds_scaling": "V only",
       "model": [
         "12",

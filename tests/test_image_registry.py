@@ -1,6 +1,7 @@
 import pytest
 
 from comicforge_ai.models import MockImageModel
+from comicforge_ai.models.gemini_image import GeminiImageProvider
 from comicforge_ai.models.image_registry import (
     ImageProviderRegistry,
     build_default_image_registry,
@@ -39,10 +40,12 @@ def test_default_image_registry_reads_environment_configuration() -> None:
         "siliconflow",
         "fal",
         "comfyui",
+        "gemini",
     ]
     assert registry.capabilities("fal").async_task is True
     assert registry.capabilities("siliconflow").multi_reference is True
     assert registry.model_choices("openai-compatible-image")
+    assert registry.capabilities("gemini").multi_reference is True
 
 
 def test_image_registry_rejects_duplicate_provider_ids() -> None:
@@ -56,3 +59,29 @@ def test_configured_provider_choices_hide_missing_credentials() -> None:
     assert [
         value for _, value in registry.configured_provider_choices()
     ] == ["mock-image"]
+
+
+def test_default_registry_reads_gemini_gateway_mode_without_global_retries() -> None:
+    registry = build_default_image_registry(
+        {
+            "GEMINI_API_KEY": "placeholder-key",
+            "GEMINI_BASE_URL": "https://proxy.example/v1",
+            "GEMINI_API_MODE": "generate-content",
+            "GEMINI_GENERATE_CONTENT_CONFIG_MODE": "response-format",
+            "GEMINI_IMAGE_MODEL": "[30额度]gemini-3.1-flash-image-preview",
+            "GEMINI_IMAGE_SIZE": "1K",
+            "GEMINI_GENERATION_TIMEOUT": "180",
+            "GEMINI_MAX_RETRIES": "0",
+            "IMAGE_MODEL_MAX_RETRIES": "2",
+        }
+    )
+
+    provider = registry.get("gemini")
+
+    assert isinstance(provider, GeminiImageProvider)
+    assert provider.api_mode == "generate-content"
+    assert provider.generate_content_config_mode == "response-format"
+    assert provider.base_url == "https://proxy.example/v1"
+    assert provider.timeout.read == 180
+    assert provider.max_retries == 0
+    assert provider.model_definitions()[0].supported_formats == ("png",)

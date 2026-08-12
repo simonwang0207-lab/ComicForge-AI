@@ -3,9 +3,13 @@ import json
 import pytest
 from provider_fixtures import comic_payload
 
-from comicforge_ai.models.base import TextModelOutputError
+from comicforge_ai.models.base import (
+    TextModelOutputError,
+    VisibleTextLanguageError,
+)
 from comicforge_ai.models.mock_text import MockTextModel
 from comicforge_ai.models.parsing import (
+    apply_visible_text_language_repair,
     extract_json_object,
     parse_comic_project,
     parse_comic_translation,
@@ -176,6 +180,78 @@ def test_common_panel_field_aliases_are_normalized() -> None:
     assert panel.narration == "雨渐渐停了。"
 
 
+def test_draft_layout_position_aliases_and_numeric_anchor_strings_are_normalized(
+) -> None:
+    payload = comic_payload(1)
+    panel = payload["panels"][0]
+    panel["character_positions"] = {
+        "小雨": "center_bottom",
+        "无关角色": "foreground",
+    }
+    panel["reserved_bubble_regions"] = ["upper_left", "foreground"]
+    panel["text_items"] = [
+        {
+            "type": "speech",
+            "speaker": "小雨",
+            "text": "找到你了！",
+            "preferred_position": "upper_right",
+            "speaker_position": "foreground",
+            "speaker_anchor": {"x": "0.25", "y": "0.70"},
+        }
+    ]
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="布局别名",
+        style="清新漫画",
+        panel_count=1,
+    )
+
+    parsed = project.panels[0]
+    assert parsed.character_positions == {"小雨": "bottom_left"}
+    assert parsed.reserved_bubble_regions == ["top_left"]
+    assert parsed.text_items[0].preferred_position == "top_right"
+    assert parsed.text_items[0].speaker_position is None
+    assert parsed.text_items[0].speaker_anchor is not None
+    assert parsed.text_items[0].speaker_anchor.x == 0.25
+    assert parsed.text_items[0].speaker_anchor.y == 0.7
+
+
+def test_draft_incomplete_optional_subshots_use_aliases_or_are_discarded() -> None:
+    payload = comic_payload(1)
+    payload["panels"][0]["subshots"] = [
+        {
+            "shot_type": "reaction",
+            "description": "小雨惊讶地回头",
+            "position": "lower_right",
+        },
+        {
+            "shot_type": "detail",
+            "focus": "雨衣口袋里的线索",
+            "position": "center_bottom",
+        },
+        {
+            "shot_type": "detail",
+            "position": "foreground",
+        },
+    ]
+
+    project = parse_comic_project(
+        json.dumps(payload, ensure_ascii=False),
+        theme="辅助镜头修复",
+        style="清新漫画",
+        panel_count=1,
+        allow_multi_shot_panels=True,
+    )
+
+    subshots = project.panels[0].subshots
+    assert len(subshots) == 2
+    assert subshots[0].visual_description == "小雨惊讶地回头"
+    assert subshots[0].position == "bottom_right"
+    assert subshots[1].visual_description == "雨衣口袋里的线索"
+    assert subshots[1].position == "bottom_left"
+
+
 def test_compact_provider_panel_does_not_confuse_composition_with_scene() -> None:
     payload = {
         "title": "哪吒闹海",
@@ -300,6 +376,129 @@ def test_chinese_project_rejects_english_visible_comic_text() -> None:
             panel_count=2,
             language="zh-CN",
         )
+
+
+def test_visible_text_language_patch_only_changes_bad_lettering() -> None:
+    payload = comic_payload(2)
+    payload["panels"][0]["dialogue"] = "I will protect everyone!"
+    payload["panels"][0]["text_items"] = [
+        {
+            "type": "speech",
+            "speaker": "小雨",
+            "text": "I will protect everyone!",
+            "preferred_position": "top_left",
+        }
+    ]
+
+    with pytest.raises(VisibleTextLanguageError) as error:
+        parse_comic_project(
+            json.dumps(payload, ensure_ascii=False),
+            theme="中文台词专项修复",
+            style="清新漫画",
+            panel_count=2,
+            language="zh-CN",
+        )
+
+    draft = error.value.project
+    original_prompt = draft.panels[0].image_prompt
+    original_scene = draft.panels[0].scene
+    repaired = apply_visible_text_language_repair(
+        json.dumps(
+            {
+                "panels": [
+                    {
+                        "sequence": 1,
+                        "texts": [{"index": 0, "text": "我会保护大家！"}],
+                        "image_prompt": "must be ignored",
+                        "scene": "must also be ignored",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        draft,
+    )
+
+    assert repaired.panels[0].text_items[0].text == "我会保护大家！"
+    assert repaired.panels[0].dialogue == "小雨：我会保护大家！"
+    assert repaired.panels[0].image_prompt == original_prompt
+    assert repaired.panels[0].scene == original_scene
+    assert repaired.panels[0].text_items[0].type == "speech"
+    assert repaired.panels[0].text_items[0].speaker == "小雨"
+
+
+def test_visible_text_repair_accepts_common_small_model_field_aliases() -> None:
+    payload = comic_payload(1)
+    payload["panels"][0]["dialogue"] = "I will protect everyone!"
+    payload["panels"][0]["text_items"] = [
+        {
+            "type": "speech",
+            "speaker": "小雨",
+            "text": "I will protect everyone!",
+        }
+    ]
+
+    with pytest.raises(VisibleTextLanguageError) as error:
+        parse_comic_project(
+            json.dumps(payload, ensure_ascii=False),
+            theme="兼容专项修复字段",
+            style="清新漫画",
+            panel_count=1,
+            language="zh-CN",
+        )
+
+    repaired = apply_visible_text_language_repair(
+        json.dumps(
+            {
+                "panels": [
+                    {
+                        "panel_id": "panel-1",
+                        "items": [
+                            {
+                                "item_index": "item_0",
+                                "translated_text": "我会保护大家！",
+                            }
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        error.value.project,
+    )
+
+    assert repaired.panels[0].text_items[0].text == "我会保护大家！"
+
+
+def test_single_target_visible_text_repair_can_infer_omitted_indexes() -> None:
+    payload = comic_payload(1)
+    payload["panels"][0]["dialogue"] = "Still English"
+    payload["panels"][0]["text_items"] = [
+        {
+            "type": "speech",
+            "speaker": "小雨",
+            "text": "Still English",
+        }
+    ]
+
+    with pytest.raises(VisibleTextLanguageError) as error:
+        parse_comic_project(
+            json.dumps(payload, ensure_ascii=False),
+            theme="单项专项修复",
+            style="清新漫画",
+            panel_count=1,
+            language="zh-CN",
+        )
+
+    repaired = apply_visible_text_language_repair(
+        json.dumps(
+            {"panels": [{"texts": [{"text": "已经改成中文。"}]}]},
+            ensure_ascii=False,
+        ),
+        error.value.project,
+    )
+
+    assert repaired.panels[0].text_items[0].text == "已经改成中文。"
 
 
 def test_user_story_recovers_wrong_language_panels_and_empty_lettering() -> None:
@@ -484,6 +683,99 @@ def test_partial_review_inherits_wholly_omitted_story_and_characters() -> None:
 
     assert reviewed.story == draft.story
     assert reviewed.characters == draft.characters
+
+
+def test_top_level_review_panel_subset_is_merged_as_patch() -> None:
+    draft = MockTextModel().generate_project("审查分格子集", "清新漫画", 4)
+    original_second = draft.panels[1].narration
+    payload = {
+        "panels": [
+            {
+                "sequence": 1,
+                "narration": "审查后修订的第一格旁白。",
+            }
+        ],
+        "review_notes": ["只需调整第一格。"],
+        "script_reviewed": True,
+    }
+
+    reviewed = parse_reviewed_project(
+        json.dumps(payload, ensure_ascii=False),
+        draft,
+    )
+
+    assert reviewed.panel_count == 4
+    assert len(reviewed.panels) == 4
+    assert reviewed.panels[0].narration == "审查后修订的第一格旁白。"
+    assert reviewed.panels[1].narration == original_second
+    assert reviewed.review_notes == ["只需调整第一格。"]
+
+
+def test_project_patch_panel_subset_inherits_unmodified_draft_panels() -> None:
+    draft = MockTextModel().generate_project("审查补丁继承", "清新漫画", 4)
+    original_panels = [panel.model_copy(deep=True) for panel in draft.panels]
+    payload = {
+        "project_patch": {
+            "panels": [
+                {
+                    "sequence": 3,
+                    "narration": "只修改第三格的旁白。",
+                }
+            ]
+        }
+    }
+
+    reviewed = parse_reviewed_project(
+        json.dumps(payload, ensure_ascii=False),
+        draft,
+    )
+
+    assert len(reviewed.panels) == 4
+    assert reviewed.panels[2].narration == "只修改第三格的旁白。"
+    assert reviewed.panels[0] == original_panels[0]
+    assert reviewed.panels[1] == original_panels[1]
+    assert reviewed.panels[3] == original_panels[3]
+
+
+@pytest.mark.parametrize(
+    ("panels", "reason"),
+    [
+        ([{"sequence": 5, "narration": "不存在的分格"}], "不属于已验证初稿"),
+        (
+            [
+                {"sequence": 1, "narration": "第一次修改"},
+                {"sequence": 1, "narration": "重复修改"},
+            ],
+            "sequence=1 重复",
+        ),
+        ([{"narration": "缺少序号"}], "sequence 缺失"),
+    ],
+)
+def test_unsafe_partial_review_panels_report_clear_merge_reason(
+    panels: list[dict[str, object]],
+    reason: str,
+) -> None:
+    draft = MockTextModel().generate_project("不安全审查补丁", "清新漫画", 4)
+
+    with pytest.raises(
+        TextModelOutputError,
+        match=f"审查稿 panels 无法安全合并：.*{reason}",
+    ):
+        parse_reviewed_project(
+            json.dumps({"panels": panels}, ensure_ascii=False),
+            draft,
+        )
+
+
+def test_empty_review_panel_patch_keeps_all_validated_draft_panels() -> None:
+    draft = MockTextModel().generate_project("空审查补丁", "清新漫画", 3)
+
+    reviewed = parse_reviewed_project(
+        json.dumps({"project_patch": {"panels": []}}, ensure_ascii=False),
+        draft,
+    )
+
+    assert reviewed.panels == draft.panels
 
 
 def test_truncated_json_reports_output_length_advice() -> None:

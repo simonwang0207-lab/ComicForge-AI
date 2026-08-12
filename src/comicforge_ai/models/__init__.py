@@ -2,7 +2,9 @@
 
 from comicforge_ai.models.base import TextModelProvider, TextModelStatus
 from comicforge_ai.models.comfyui_image import ComfyUIImageProvider
+from comicforge_ai.models.deepseek_text import DeepSeekTextModel
 from comicforge_ai.models.fal_image import FalImageProvider
+from comicforge_ai.models.gemini_image import GeminiImageProvider
 from comicforge_ai.models.image_base import (
     AuthenticationError,
     ConfigurationError,
@@ -42,7 +44,9 @@ __all__ = [
     "ComfyUIImageProvider",
     "ConfigurationError",
     "ContentPolicyError",
+    "DeepSeekTextModel",
     "FalImageProvider",
+    "GeminiImageProvider",
     "ImageGeneration",
     "ImageGenerationResult",
     "ImageModelDefinition",

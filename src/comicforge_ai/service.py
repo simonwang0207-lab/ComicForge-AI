@@ -12,7 +12,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from PIL import Image
@@ -874,7 +874,7 @@ class ComicGenerator:
         records[panel_sequence] = restored_record
         working.panel_images = [records[item.sequence] for item in working.panels]
         options = image_options or ImageGenerationOptions()
-        comic_page, output_path, pdf_path, project_json_path = (
+        comic_page, _output_path, pdf_path, project_json_path = (
             self._rerender_saved_panels(working, options, artifact_tag="")
         )
         return ComicGenerationResult(
@@ -936,7 +936,7 @@ class ComicGenerator:
             sequence=panel_sequence,
             version=version,
             local_path=relative_path,
-            archived_at=datetime.now().isoformat(timespec="seconds"),
+            archived_at=datetime.now(UTC).isoformat(timespec="seconds"),
             reason=reason,
             record=archived_record,
         )
@@ -1373,14 +1373,11 @@ class ComicGenerator:
         options = options or ImageGenerationOptions(
             concurrency=max(1, _environment_integer("IMAGE_PANEL_CONCURRENCY", 1))
         )
-        if options.reference_images and not options.reference_source:
-            options = replace(
-                options,
-                reference_source="user_upload",
-                reference_character_names=(
-                    (project.characters[0].name,) if project.characters else ()
-                ),
-            )
+        options = self._prepare_reference_options(
+            project,
+            requested_provider,
+            options,
+        )
         project.bubble_theme = options.bubble_theme or project.bubble_theme
         project.lettering_style = options.lettering_style
         project.show_panel_numbers = options.show_panel_numbers
@@ -1441,16 +1438,10 @@ class ComicGenerator:
                 reference_character_names=tuple(reference_panel.characters),
             )
         def panel_options(panel: PanelSpec) -> ImageGenerationOptions:
-            return (
-                options
-                if self._panel_can_use_reference(panel, requested_provider, options)
-                else replace(
-                    options,
-                    reference_images=(),
-                    reference_source="",
-                    reference_panel_sequence=None,
-                    reference_character_names=(),
-                )
+            return self._reference_options_for_panel(
+                panel,
+                requested_provider,
+                options,
             )
 
         if concurrency == 1:
@@ -1579,6 +1570,90 @@ class ComicGenerator:
         )
 
     @staticmethod
+    def _prepare_reference_options(
+        project: ComicProject,
+        provider: ImageProvider,
+        options: ImageGenerationOptions,
+    ) -> ImageGenerationOptions:
+        """Bind uploaded references to story-bible characters by list order."""
+        if not options.reference_images:
+            return options
+        source = options.reference_source or "user_upload"
+        if source != "user_upload" or options.reference_character_names:
+            return replace(options, reference_source=source)
+
+        characters = [character.name for character in project.characters]
+        if not characters:
+            raise ImageModelError(
+                "项目没有可绑定参考图的角色，请先生成或补充角色设定。"
+            )
+        if len(options.reference_images) > len(characters):
+            raise ImageModelError(
+                "角色参考图数量超过项目角色数量；请为每个角色最多上传一张标准参考图。"
+            )
+
+        return replace(
+            options,
+            reference_source=source,
+            reference_character_names=tuple(
+                characters[: len(options.reference_images)]
+            ),
+        )
+
+    @classmethod
+    def _reference_options_for_panel(
+        cls,
+        panel: PanelSpec,
+        provider: ImageProvider,
+        options: ImageGenerationOptions,
+    ) -> ImageGenerationOptions:
+        """Return only the identity references that belong to this panel."""
+        if not cls._panel_can_use_reference(panel, provider, options):
+            return cls._without_reference(options)
+
+        if (
+            options.reference_source == "user_upload"
+            and options.reference_character_names
+        ):
+            bindings = list(
+                zip(
+                    options.reference_character_names,
+                    options.reference_images,
+                    strict=False,
+                )
+            )
+            matching = [
+                (name, image)
+                for name, image in bindings
+                if name in panel.characters
+            ]
+            if not matching:
+                return cls._without_reference(options)
+            capabilities = provider.get_capabilities()
+            if len(matching) > 1 and not capabilities.multi_reference:
+                # Passing one arbitrary character reference to a group panel
+                # makes that identity dominate or leak into the other cast.
+                return cls._without_reference(options)
+            return replace(
+                options,
+                reference_character_names=tuple(name for name, _ in matching),
+                reference_images=tuple(image for _, image in matching),
+            )
+        return options
+
+    @staticmethod
+    def _without_reference(
+        options: ImageGenerationOptions,
+    ) -> ImageGenerationOptions:
+        return replace(
+            options,
+            reference_images=(),
+            reference_source="",
+            reference_panel_sequence=None,
+            reference_character_names=(),
+        )
+
+    @staticmethod
     def _panel_can_use_reference(
         panel: PanelSpec,
         provider: ImageProvider,
@@ -1592,6 +1667,11 @@ class ComicGenerator:
             return False
         if not provider.restrict_reference_to_portrait_panels:
             return True
+        # A matching single-character reference is an identity constraint, not
+        # a request to copy the reference composition. Keep it active for wide,
+        # establishing and aerial shots as well; the low IPAdapter weight and
+        # scene-first prompt preserve the requested framing. Group panels still
+        # bypass a single-reference workflow to avoid identity leakage.
         return len(panel.characters) == 1
 
     def _resolve_image_provider_chain(
@@ -1646,6 +1726,7 @@ class ComicGenerator:
                 project,
                 panel,
                 profile=prompt_profile,
+                reference_character_names=options.reference_character_names,
             )
             panel_seed = (
                 requested_seed + panel.sequence - 1
@@ -1771,6 +1852,11 @@ class ComicGenerator:
                     options.reference_panel_sequence
                     if successful_request.reference_images
                     else None
+                ),
+                reference_character_names=(
+                    list(options.reference_character_names)
+                    if successful_request.reference_images
+                    else []
                 ),
             ),
             fallback_used=fallback_used,

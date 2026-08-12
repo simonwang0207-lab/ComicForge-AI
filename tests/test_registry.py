@@ -11,6 +11,7 @@ def test_default_registry_contains_all_three_provider_types() -> None:
         "mock",
         "ollama",
         "openai-compatible",
+        "deepseek",
     ]
     assert registry.get("mock").display_name == "Mock 文本模型（离线）"
 

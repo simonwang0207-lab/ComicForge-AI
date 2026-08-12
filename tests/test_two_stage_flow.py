@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from comicforge_ai.models.base import (
     TextModelOutputError,
     TextModelResourceReleaseStatus,
 )
+from comicforge_ai.models.parsing import parse_reviewed_project
 from comicforge_ai.schemas import ComicProject, ContentLanguage
 from comicforge_ai.service import ComicGenerator, ImageGenerationOptions
 from comicforge_ai.ui import relocalize_for_ui
@@ -88,6 +90,27 @@ class FailingReviewProvider(MockTextModel):
 
     def review_project(self, project: ComicProject) -> ComicProject:
         raise TextModelOutputError("审查补丁仍然无效")
+
+
+class UnsafePartialReviewProvider(MockTextModel):
+    model_id = "unsafe-partial-review"
+    display_name = "Unsafe Partial Review"
+
+    def review_project(self, project: ComicProject) -> ComicProject:
+        return parse_reviewed_project(
+            json.dumps(
+                {
+                    "panels": [
+                        {
+                            "sequence": project.panel_count + 1,
+                            "narration": "无法对应到初稿的分格",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            project,
+        )
 
 
 class TranslationTextProvider(MockTextModel):
@@ -236,6 +259,44 @@ def test_failed_review_keeps_the_validated_draft_usable() -> None:
     assert result.fallback_used is False
     assert "审查未应用" in result.fallback_reason
     assert "审查未应用" in result.actual_provider_name
+
+
+def test_unsafe_review_panel_patch_is_visible_and_draft_can_still_render(
+    tmp_path: Path,
+) -> None:
+    generator = ComicGenerator(
+        registry=TextModelRegistry(
+            [MockTextModel(), UnsafePartialReviewProvider()]
+        ),
+        output_dir=tmp_path,
+        fallback_to_mock=False,
+        image_fallback_to_mock=False,
+    )
+
+    result = generator.generate_script_with_status(
+        "保留可生图初稿",
+        "漫画",
+        2,
+        provider_id="mock",
+        review_provider_id="unsafe-partial-review",
+    )
+
+    assert result.project.review_applied is False
+    assert result.project.script_reviewed is False
+    assert len(result.project.panels) == 2
+    assert "审查稿 panels 无法安全合并" in result.fallback_reason
+    assert "不属于已验证初稿" in result.fallback_reason
+    assert "已保留通过结构校验的初稿" in result.project.review_notes[-1]
+
+    rendered = generator.render_confirmed_project(
+        result.project,
+        "mock-image",
+        ImageGenerationOptions(),
+    )
+
+    assert len(rendered.panel_image_paths) == 2
+    assert rendered.project.output_path is not None
+    assert rendered.project.review_applied is False
 
 
 def test_user_can_supply_a_script_before_first_storyboard_generation(

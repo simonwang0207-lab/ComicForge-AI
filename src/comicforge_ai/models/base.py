@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -14,8 +15,77 @@ from comicforge_ai.prompts import (
     build_story_guidance_repair_messages,
     build_story_guidance_revision_messages,
     build_story_review_messages,
+    build_visible_text_language_repair_messages,
 )
 from comicforge_ai.schemas import ComicProject, ContentLanguage, LayoutMode
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_identifier_summary(value: object) -> object:
+    if isinstance(value, bool):
+        return "<bool>"
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdecimal() and len(stripped) <= 8:
+            return stripped
+        return f"<str length={len(value)}>"
+    return f"<{type(value).__name__}>"
+
+
+def _safe_json_structure_summary(raw_output: str) -> str:
+    """Describe response shape for terminal diagnostics without logging content."""
+    from comicforge_ai.models.parsing import extract_json_object
+
+    try:
+        payload = extract_json_object(raw_output)
+    except TextModelOutputError as exc:
+        return f"json_error={exc}"
+
+    top_keys = sorted(str(key)[:40] for key in payload)[:20]
+    panels = payload.get("panels")
+    if not isinstance(panels, list):
+        return f"top_keys={top_keys}; panels_type={type(panels).__name__}"
+
+    panel_summaries: list[str] = []
+    sequence_names = (
+        "sequence", "index", "panel_index", "panel_number", "panel_no",
+        "panel_id", "panel", "number", "序号", "格号", "分格序号",
+        "分镜序号",
+    )
+    for index, panel in enumerate(panels[:12]):
+        if not isinstance(panel, dict):
+            panel_summaries.append(f"{index}:type={type(panel).__name__}")
+            continue
+        keys = sorted(str(key)[:40] for key in panel)[:20]
+        sequence_fields = {
+            name: _safe_identifier_summary(panel[name])
+            for name in sequence_names
+            if name in panel
+        }
+        texts = next(
+            (
+                panel[name]
+                for name in ("texts", "text_items", "items", "文字", "修复文字")
+                if name in panel
+            ),
+            None,
+        )
+        texts_shape = (
+            f"list[{len(texts)}]"
+            if isinstance(texts, list)
+            else type(texts).__name__
+        )
+        panel_summaries.append(
+            f"{index}:keys={keys},sequence_fields={sequence_fields},"
+            f"texts={texts_shape}"
+        )
+    return (
+        f"top_keys={top_keys}; panel_count={len(panels)}; "
+        f"panels=[{' | '.join(panel_summaries)}]"
+    )
 
 
 class TextModelError(RuntimeError):
@@ -88,6 +158,23 @@ class TextModelNotFoundError(TextModelRequestError):
 
 class TextModelOutputError(TextModelError):
     """Raised when a model response cannot become a valid project."""
+
+
+class VisibleTextLanguageError(TextModelOutputError):
+    """A structurally valid draft contains lettering in the wrong language."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        project: ComicProject,
+        panel_sequences: tuple[int, ...],
+        text_indexes: tuple[tuple[int, int], ...],
+    ) -> None:
+        self.project = project
+        self.panel_sequences = panel_sequences
+        self.text_indexes = text_indexes
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,8 +301,14 @@ class TextModelProvider(ABC):
 class RemoteTextModelProvider(TextModelProvider, ABC):
     """Shared JSON generation and limited repair loop for HTTP providers."""
 
-    def __init__(self, *, max_retries: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        max_retries: int = 1,
+        language_repair_attempts: int = 2,
+    ) -> None:
         self.max_retries = max(0, max_retries)
+        self.language_repair_attempts = max(0, language_repair_attempts)
 
     def configuration_status(self) -> TextModelStatus:
         """Expose the existing local-only configuration check to registries."""
@@ -231,7 +324,10 @@ class RemoteTextModelProvider(TextModelProvider, ABC):
         allow_multi_shot_panels: bool = False,
         source_story: str = "",
     ) -> ComicProject:
-        from comicforge_ai.models.parsing import parse_comic_project
+        from comicforge_ai.models.parsing import (
+            apply_visible_text_language_repair,
+            parse_comic_project,
+        )
 
         clean_theme = theme.strip()
         clean_style = style.strip()
@@ -274,7 +370,74 @@ class RemoteTextModelProvider(TextModelProvider, ABC):
                 )
                 project.user_story_guidance = clean_source_story
                 return project
+            except VisibleTextLanguageError as exc:
+                last_error = exc
+                if self.language_repair_attempts == 0:
+                    break
+                repair_project = exc.project
+                repair_indexes = exc.text_indexes
+                repair_error: TextModelOutputError = exc
+                for repair_attempt in range(1, self.language_repair_attempts + 1):
+                    repair_output = self._chat_for_repair(
+                        build_visible_text_language_repair_messages(
+                            repair_project,
+                            repair_indexes,
+                        )
+                    )
+                    try:
+                        project = apply_visible_text_language_repair(
+                            repair_output,
+                            repair_project,
+                        )
+                        project.user_story_guidance = clean_source_story
+                        return project
+                    except VisibleTextLanguageError as repair_exc:
+                        # Keep any successfully localized items and request only
+                        # the still-invalid indexes on the bounded next attempt.
+                        logger.warning(
+                            "Visible-text repair still has wrong-language items: "
+                            "provider=%s model=%s attempt=%d/%d remaining=%s "
+                            "response_structure=%s",
+                            self.model_id,
+                            self.model_name,
+                            repair_attempt,
+                            self.language_repair_attempts,
+                            repair_exc.text_indexes,
+                            _safe_json_structure_summary(repair_output),
+                        )
+                        repair_project = repair_exc.project
+                        repair_indexes = repair_exc.text_indexes
+                        repair_error = repair_exc
+                    except TextModelOutputError as repair_exc:
+                        logger.warning(
+                            "Visible-text repair output rejected: provider=%s "
+                            "model=%s attempt=%d/%d error=%s "
+                            "response_structure=%s",
+                            self.model_id,
+                            self.model_name,
+                            repair_attempt,
+                            self.language_repair_attempts,
+                            repair_exc,
+                            _safe_json_structure_summary(repair_output),
+                        )
+                        repair_error = repair_exc
+                last_error = TextModelOutputError(
+                    "可见漫画文字专项修复已执行 "
+                    f"{self.language_repair_attempts} 次但仍未通过校验："
+                    f"{repair_error}"
+                )
+                break
             except TextModelOutputError as exc:
+                logger.warning(
+                    "Text project output rejected: provider=%s model=%s "
+                    "attempt=%d/%d error=%s response_structure=%s",
+                    self.model_id,
+                    self.model_name,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    exc,
+                    _safe_json_structure_summary(raw_output),
+                )
                 last_error = exc
                 if attempt >= self.max_retries:
                     break
@@ -289,6 +452,12 @@ class RemoteTextModelProvider(TextModelProvider, ABC):
                     allow_multi_shot_panels,
                     clean_source_story,
                 )
+        logger.error(
+            "Text generation failed validation: provider=%s model=%s error=%s",
+            self.model_id,
+            self.model_name,
+            last_error,
+        )
         raise TextModelOutputError(
             f"{self.display_name} 返回内容无法解析：{last_error}"
         ) from last_error
@@ -423,4 +592,8 @@ class RemoteTextModelProvider(TextModelProvider, ABC):
 
     def _chat_for_review(self, messages: list[dict[str, str]]) -> str:
         """Run review generation; providers may apply a shorter read budget."""
+        return self._chat(messages)
+
+    def _chat_for_repair(self, messages: list[dict[str, str]]) -> str:
+        """Run a small deterministic repair; providers may reduce its budget."""
         return self._chat(messages)

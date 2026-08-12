@@ -10,6 +10,7 @@ from typing import Any
 
 from comicforge_ai.models.comfyui_image import ComfyUIImageProvider
 from comicforge_ai.models.fal_image import FalImageProvider
+from comicforge_ai.models.gemini_image import GeminiImageProvider
 from comicforge_ai.models.image_base import (
     ImageModelDefinition,
     ImageProvider,
@@ -186,6 +187,34 @@ def build_default_image_registry(
                 ),
                 poll_interval=_number_setting(env, "IMAGE_MODEL_POLL_INTERVAL", 1),
                 max_download_bytes=max_download_bytes,
+            ),
+            GeminiImageProvider(
+                api_key=env.get("GEMINI_API_KEY", ""),
+                model=env.get(
+                    "GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"
+                ),
+                base_url=env.get(
+                    "GEMINI_BASE_URL",
+                    "https://generativelanguage.googleapis.com/v1beta",
+                ),
+                api_mode=env.get("GEMINI_API_MODE", "interactions"),
+                generate_content_config_mode=env.get(
+                    "GEMINI_GENERATE_CONTENT_CONFIG_MODE", "image-config"
+                ),
+                image_size=env.get("GEMINI_IMAGE_SIZE", "1K"),
+                connect_timeout=connect_timeout,
+                generation_timeout=_number_setting(
+                    env, "GEMINI_GENERATION_TIMEOUT", generation_timeout
+                ),
+                status_timeout=_number_setting(
+                    env, "GEMINI_STATUS_TIMEOUT", 10
+                ),
+                max_retries=_integer_setting(env, "GEMINI_MAX_RETRIES", 0),
+                retry_base_delay=retry_delay,
+                max_download_bytes=max_download_bytes,
+                max_inline_request_bytes=_integer_setting(
+                    env, "GEMINI_MAX_INLINE_REQUEST_BYTES", 20 * 1024 * 1024
+                ),
             ),
         ]
     )

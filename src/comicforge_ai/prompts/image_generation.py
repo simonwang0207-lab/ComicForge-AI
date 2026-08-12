@@ -134,13 +134,22 @@ def build_panel_image_request(
     panel: PanelSpec,
     *,
     profile: str = PROMPT_PROFILE_NEUTRAL,
+    reference_character_names: tuple[str, ...] = (),
 ) -> PanelImageRequest:
     """Build one panel prompt using the selected Provider's prompt profile."""
     _validate_profile(profile)
     if profile == PROMPT_PROFILE_ANIMAGINE_XL:
-        prompt = _build_animagine_xl_prompt(project, panel)
+        prompt = _build_animagine_xl_prompt(
+            project,
+            panel,
+            reference_character_names=reference_character_names,
+        )
     elif profile == PROMPT_PROFILE_SD_COMFYUI:
-        prompt = _build_sd_comfyui_prompt(project, panel)
+        prompt = _build_sd_comfyui_prompt(
+            project,
+            panel,
+            reference_character_names=reference_character_names,
+        )
     else:
         prompt = _build_rich_localized_prompt(project, panel)
     return PanelImageRequest(panel=panel, style=project.style, prompt=prompt)
@@ -197,6 +206,8 @@ def build_panel_negative_prompt(
 def _build_animagine_xl_prompt(
     project: ComicProject,
     panel: PanelSpec,
+    *,
+    reference_character_names: tuple[str, ...] = (),
 ) -> str:
     """Build a tag-forward prompt for Animagine XL without affecting Recraft."""
     style = _animagine_style_prompt(project)
@@ -225,12 +236,20 @@ def _build_animagine_xl_prompt(
             "use reference only for character identity, never copy its pose, framing, "
             "background or camera angle"
         ),
-        _animagine_scene_prompt(project, panel),
+        _animagine_scene_prompt(
+            project,
+            panel,
+            reference_character_names=reference_character_names,
+        ),
         (
             "recognizable coherent featured subject, intact identity and silhouette, "
             "all defining features attached to the same subject"
         ),
-        _animagine_character_anchor(project, panel),
+        _animagine_character_anchor(
+            project,
+            panel,
+            reference_character_names=reference_character_names,
+        ),
         (
             "same visual style across the comic series, consistent species and body "
             "anatomy, consistent character design, consistent colors, clean lineart, "
@@ -304,28 +323,51 @@ def _clean_character_parts(character: CharacterProfile) -> list[str]:
     ]
 
 
-def _animagine_character_anchor(project: ComicProject, panel: PanelSpec) -> str:
+def _animagine_character_anchor(
+    project: ComicProject,
+    panel: PanelSpec,
+    *,
+    reference_character_names: tuple[str, ...] = (),
+) -> str:
     """Use provider-neutral structured identity before the scene description."""
+    referenced = set(reference_character_names).intersection(panel.characters)
     descriptions: list[str] = []
     for character in _selected_characters(project, panel):
+        if character.name in referenced:
+            continue
         parts = _clean_character_parts(character)
         description = ", ".join(dict.fromkeys(parts))
         if description:
             descriptions.append(description)
+    anchors: list[str] = []
+    if referenced:
+        anchors.append(
+            "REFERENCE IMAGE IDENTITY LOCK: same character as the reference image; "
+            "preserve identity, outfit, hairstyle and face from the reference image; "
+            "change only action, expression, scene and camera"
+        )
     if not descriptions:
-        return ""
-    quantity = "one featured subject" if len(descriptions) == 1 else (
-        f"exactly {len(descriptions)} featured subjects"
+        return "; ".join(anchors)
+    quantity = (
+        "one text-described subject"
+        if len(descriptions) == 1
+        else f"exactly {len(descriptions)} text-described subjects"
     )
-    return (
+    anchors.append(
         f"SUBJECT IDENTITY LOCK: {quantity}; keep the exact entity type, species or "
         "category, body structure, silhouette, colors, clothing and signature items "
         "described here; never replace it with another kind of entity: "
         + "; ".join(descriptions)
     )
+    return "; ".join(anchors)
 
 
-def _animagine_scene_prompt(project: ComicProject, panel: PanelSpec) -> str:
+def _animagine_scene_prompt(
+    project: ComicProject,
+    panel: PanelSpec,
+    *,
+    reference_character_names: tuple[str, ...] = (),
+) -> str:
     """Keep scene/camera information separate from the identity anchor.
 
     Text providers often repeat a character's eyes, face, body and colors inside
@@ -357,6 +399,12 @@ def _animagine_scene_prompt(project: ComicProject, panel: PanelSpec) -> str:
     scene_prompt = ", ".join(dict.fromkeys(scene_parts))
     if not scene_prompt:
         scene_prompt = panel.image_prompt or panel.visual_description
+    scene_prompt = _strip_referenced_character_appearance(
+        scene_prompt,
+        project,
+        panel,
+        reference_character_names,
+    )
     return _clean_positive_prompt(scene_prompt).rstrip(".")
 
 
@@ -382,7 +430,12 @@ def _animagine_subject_negative(
     return ", ".join(dict.fromkeys((provider_agnostic, *avoided)))
 
 
-def _build_sd_comfyui_prompt(project: ComicProject, panel: PanelSpec) -> str:
+def _build_sd_comfyui_prompt(
+    project: ComicProject,
+    panel: PanelSpec,
+    *,
+    reference_character_names: tuple[str, ...] = (),
+) -> str:
     """Build the concise English prompt used by the local SD/ComfyUI workflow."""
     structure_prompt = (
         "TWO-VIEW COMPOSITION: one dominant continuous scene with one small "
@@ -399,8 +452,19 @@ def _build_sd_comfyui_prompt(project: ComicProject, panel: PanelSpec) -> str:
             "clear focal subject, readable silhouette, coherent background."
         ),
         structure_prompt,
-        _clean_positive_prompt(panel.image_prompt),
-        _sd_character_anchor(project, panel),
+        _clean_positive_prompt(
+            _strip_referenced_character_appearance(
+                panel.image_prompt,
+                project,
+                panel,
+                reference_character_names,
+            )
+        ),
+        _sd_character_anchor(
+            project,
+            panel,
+            reference_character_names=reference_character_names,
+        ),
         _sd_project_style_lock(project),
     ]
     target_ratio = panel_target_aspect_ratio(
@@ -565,25 +629,105 @@ def _sd_project_style_lock(project: ComicProject) -> str:
     )
 
 
-def _sd_character_anchor(project: ComicProject, panel: PanelSpec) -> str:
+def _sd_character_anchor(
+    project: ComicProject,
+    panel: PanelSpec,
+    *,
+    reference_character_names: tuple[str, ...] = (),
+) -> str:
     """Build a short English identity anchor that SD 1.5 can consistently parse."""
+    referenced = set(reference_character_names).intersection(panel.characters)
     descriptions: list[str] = []
     for character in _selected_characters(project, panel):
+        if character.name in referenced:
+            continue
         english_parts = _clean_character_parts(character)
         if english_parts:
             descriptions.append(", ".join(dict.fromkeys(english_parts)))
+    anchors: list[str] = []
+    if referenced:
+        anchors.append(
+            "REFERENCE IMAGE IDENTITY LOCK: same character as the reference image; "
+            "preserve identity, outfit, hairstyle and face from the reference image; "
+            "change only action, expression, scene and camera"
+        )
     if not descriptions:
-        return ""
+        return "; ".join(anchors)
     quantity = (
         "exactly one featured character"
         if len(descriptions) == 1
         else f"exactly {len(descriptions)} featured characters"
     )
-    return (
+    anchors.append(
         f"CHARACTER IDENTITY LOCK: {quantity}: "
         + "; ".join(descriptions)
         + ". Keep this exact design and do not create duplicate copies."
     )
+    return "; ".join(anchors)
+
+
+_REFERENCE_APPEARANCE_TERMS = re.compile(
+    r"\b(?:hair|hairstyle|bangs|braids?|ponytail|buns?|eyes?|face|facial|skin|"
+    r"robe|shirt|jacket|coat|dress|skirt|pants|shorts|armor|armour|uniform|"
+    r"costume|outfit|clothing|garment|boots?|shoes?|hat|helmet|horns?|ears?)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_referenced_character_appearance(
+    prompt: str,
+    project: ComicProject,
+    panel: PanelSpec,
+    reference_character_names: tuple[str, ...],
+) -> str:
+    """Remove known text-profile traits when a reference owns character identity."""
+    referenced = set(reference_character_names).intersection(panel.characters)
+    if not referenced or not prompt.strip():
+        return prompt
+
+    fragments: set[str] = set()
+    for character in project.characters:
+        if character.name not in referenced:
+            continue
+        values = (
+            character.appearance,
+            character.visual_prompt,
+            character.hairstyle,
+            character.facial_features,
+            character.clothing,
+            *character.identity_features,
+        )
+        for value in values:
+            if not value or not value.isascii():
+                continue
+            candidates = {
+                value.strip(),
+                re.sub(r"\s*\([^)]*\)", "", value).strip(),
+            }
+            candidates.update(
+                part.strip(" ,.;:")
+                for part in re.split(r"\s+(?:with|and)\s+|[,;]", value)
+            )
+            fragments.update(
+                candidate
+                for candidate in candidates
+                if len(candidate) >= 4
+                and _REFERENCE_APPEARANCE_TERMS.search(candidate)
+            )
+
+    cleaned = prompt
+    for fragment in sorted(fragments, key=len, reverse=True):
+        cleaned = re.sub(
+            rf"(?<!\w){re.escape(fragment)}(?!\w)",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    cleaned = re.sub(r"\bwith\s+(?:and\s+)?(?=(?:on|in|at|by|under|over)\b)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:with|and)\s*(?=[,;.])", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*,\s*,+", ", ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip(" ,.;")
 
 
 def _localized_project_style_lock(project: ComicProject) -> str:

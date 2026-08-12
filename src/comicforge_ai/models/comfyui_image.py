@@ -44,7 +44,12 @@ class ComfyUIImageProvider(ImageProvider):
     model_id = "comfyui"
     display_name = "ComfyUI Workflow"
     uses_local_accelerator = True
-    auto_reference_from_first_panel = True
+    # A finished story panel is not a safe identity reference: its pose,
+    # framing and background are all encoded by a whole-image IPAdapter. In
+    # particular, using a close-up first panel tends to turn every later scene
+    # into another close-up. ComfyUI therefore only uses explicit character
+    # references supplied by the caller.
+    auto_reference_from_first_panel = False
     restrict_reference_to_portrait_panels = True
     provider_type = "local_async_http"
     prompt_profile = "sd_comfyui"

@@ -57,6 +57,92 @@ _LAYOUT_CHOICES = [
 _AUTO_LAYOUT_CHOICES = [item for item in _LAYOUT_CHOICES if item[1] != "custom_page"]
 
 
+def reference_upload_guide(
+    project_state: dict[str, object] | None,
+) -> str:
+    """Describe the exact positional reference order for the current project."""
+    if not project_state:
+        return (
+            "#### 角色参考图顺序\n"
+            "请先生成或载入剧本；角色列表出现后，再按显示顺序添加参考图。"
+        )
+    try:
+        project = ComicProject.model_validate(project_state)
+    except ValueError:
+        return "#### 角色参考图顺序\n当前项目角色数据无法读取。"
+    if not project.characters:
+        return "#### 角色参考图顺序\n当前剧本没有可绑定的角色。"
+    ordered = "\n".join(
+        f"{index}. `{character.name.replace('`', '')}`"
+        for index, character in enumerate(project.characters, start=1)
+    )
+    return (
+        "#### 按以下角色顺序添加参考图\n"
+        f"{ordered}\n\n"
+        "批量导入后可直接拖动文件项调整顺序；也可以在右侧粘贴一张图片，"
+        "再点击“加入参考图列表”。第 1 张对应第 1 个角色，以此类推。\n\n"
+        "当前 ComfyUI Workflow 每格最多接收 1 张参考图：单角色分格会按名称使用"
+        "对应图片；多人同格会暂时停用参考图以避免人物特征互相污染。"
+    )
+
+
+def append_reference_image_for_ui(
+    pasted_image: str | None,
+    current_images: list[str] | str | None,
+) -> tuple[list[str], None]:
+    """Append one uploaded/clipboard image to the ordered reference list."""
+    if isinstance(current_images, str):
+        ordered = [current_images]
+    else:
+        ordered = list(current_images or [])
+    if not pasted_image:
+        gr.Warning("请先粘贴或导入一张角色参考图。", duration=3)
+        return ordered, None
+    pasted = str(pasted_image)
+    if pasted not in ordered:
+        ordered.append(pasted)
+    return ordered, None
+
+
+def reference_file_order_markdown(
+    project_state: dict[str, object] | None,
+    current_images: list[str] | str | None,
+) -> str:
+    """Show the actual uploaded order and its positional character binding."""
+    ordered = (
+        [current_images]
+        if isinstance(current_images, str)
+        else list(current_images or [])
+    )
+    if not ordered:
+        return "#### 当前已导入顺序\n尚未添加参考图。"
+
+    character_names: list[str] = []
+    if project_state:
+        try:
+            project = ComicProject.model_validate(project_state)
+        except ValueError:
+            pass
+        else:
+            character_names = [character.name for character in project.characters]
+
+    rows: list[str] = []
+    for index, image_path in enumerate(ordered, start=1):
+        filename = Path(str(image_path)).name.replace("`", "")
+        character = (
+            character_names[index - 1].replace("`", "")
+            if index <= len(character_names)
+            else "未绑定角色"
+        )
+        rows.append(f"{index}. `{filename}` → **{character}**")
+    return "#### 当前已导入顺序\n" + "\n".join(rows)
+
+
+def clear_reference_images_for_ui() -> tuple[None, None]:
+    """Clear both the ordered list and clipboard staging input."""
+    return None, None
+
+
 def workflow_mode_updates(
     generation_mode: str,
     layout_mode: LayoutMode,
@@ -299,8 +385,12 @@ _APP_CSS = """
   left: 50%;
   transform: translate(-50%, -50%);
   width: min(760px, calc(100vw - 40px));
-  max-height: min(78vh, 760px);
-  overflow-y: auto;
+  box-sizing: border-box;
+  max-height: min(88dvh, 860px) !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   z-index: 1000;
   border: 1px solid #dfe5ef !important;
   border-radius: 8px !important;
@@ -310,6 +400,21 @@ _APP_CSS = """
   box-shadow:
     0 18px 50px rgba(24, 31, 54, .25),
     0 0 0 100vmax rgba(22, 27, 42, .42);
+}
+/*
+ * Gradio 5 Group renders an inner .styler div with overflow:hidden.  Let the
+ * fixed modal own vertical scrolling so every advanced setting remains
+ * reachable on shorter screens.
+ */
+.cf-advanced-settings > .styler {
+  flex: 0 0 auto !important;
+  overflow: visible !important;
+}
+.cf-advanced-settings::-webkit-scrollbar { width: 10px; }
+.cf-advanced-settings::-webkit-scrollbar-thumb {
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  background: rgba(109, 93, 252, .42);
 }
 .cf-advanced-settings .form,
 .cf-advanced-settings .block,
@@ -576,6 +681,27 @@ _APP_CSS = """
 .cf-compact-upload .file-preview {
   min-height: 84px !important;
   max-height: 130px !important;
+}
+#cf-reference-files {
+  height: auto !important;
+  max-height: 320px !important;
+  overflow: visible !important;
+}
+#cf-reference-files .file-preview-holder {
+  min-height: 120px !important;
+  max-height: 250px !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+#cf-reference-files .file-preview {
+  max-height: none !important;
+  overflow: visible !important;
+}
+#cf-reference-files .file-preview-holder::-webkit-scrollbar { width: 8px; }
+#cf-reference-files .file-preview-holder::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(109, 93, 252, .35);
 }
 .cf-canvas-shell {
   --block-background-fill: #ffffff;
@@ -1149,10 +1275,23 @@ def _generation_status_markdown(result: ComicGenerationResult) -> str:
         f"{item.actual_parameters.get('aspect_ratio') or _record_dimensions(item.actual_parameters)}`"
         for item in result.project.panel_images
     )
+    reference_usage = "、".join(
+        (
+            f"第 {item.sequence} 格 `"
+            + (
+                "、".join(item.reference_character_names)
+                if item.reference_character_names
+                else "未使用"
+            )
+            + "`"
+        )
+        for item in result.project.panel_images
+    )
     image_status += (
         f"  \n请求 ID：{request_ids or '无'}"
         f"  \n各分格 Seed：{seeds or '未指定/Provider 未返回'}"
         f"  \n实际请求画幅：{generated_sizes or 'Provider 未返回'}"
+        f"  \n角色参考图实际使用：{reference_usage or '无记录'}"
     )
     return text_status + "\n\n" + image_status
 
@@ -1511,8 +1650,11 @@ def restore_panel_version_for_ui(
         str(result.project.output_path),
         str(result.comic_pdf_path),
         str(result.project_json_path),
-        f"第 {sequence} 格已恢复到 v{selected_version}。恢复前的当前图片也已归档，"
-        f"现有版本：{', '.join(f'v{item}' for item in versions)}。",
+        (
+            f"第 {sequence} 格已恢复到 v{selected_version}。"
+            "恢复前的当前图片也已归档，"
+            f"现有版本：{', '.join(f'v{item}' for item in versions)}。"
+        ),
     )
 
 
@@ -2046,11 +2188,8 @@ def create_demo(
                 visible=bool(
                     capabilities.image_to_image or capabilities.multi_reference
                 ),
-                interactive=bool(
-                    capabilities.image_to_image or capabilities.multi_reference
-                ),
-                value=None,
             ),
+            gr.update(value=None),
             gr.update(
                 visible=bool(capabilities.mask_edit or capabilities.inpainting),
                 interactive=bool(
@@ -2407,17 +2546,48 @@ def create_demo(
                         visible=False,
                         interactive=False,
                     )
-                    with gr.Row(elem_classes="cf-advanced-section"):
-                        reference_images = gr.File(
-                            label="单角色参考图",
-                            file_count="multiple",
-                            file_types=["image"],
-                            type="filepath",
-                            height=160,
-                            visible=False,
-                            interactive=False,
-                            scale=1,
+                    with gr.Column(
+                        visible=False,
+                        elem_classes="cf-advanced-section",
+                    ) as reference_tools:
+                        reference_file_order = gr.Markdown(
+                            reference_file_order_markdown(None, None),
+                            elem_classes="cf-mini-status",
                         )
+                        reference_order_guide = gr.Markdown(
+                            reference_upload_guide(None),
+                            elem_classes="cf-mini-status",
+                        )
+                        with gr.Row():
+                            with gr.Column(scale=2):
+                                reference_images = gr.File(
+                                    label="有序角色参考图（可批量导入并拖动排序）",
+                                    file_count="multiple",
+                                    file_types=["image"],
+                                    type="filepath",
+                                    height=300,
+                                    allow_reordering=True,
+                                    elem_id="cf-reference-files",
+                                )
+                            with gr.Column(scale=1):
+                                reference_clipboard_image = gr.Image(
+                                    label="粘贴或导入一张参考图",
+                                    sources=["clipboard", "upload"],
+                                    type="filepath",
+                                    height=190,
+                                    show_download_button=False,
+                                    show_fullscreen_button=False,
+                                )
+                        with gr.Row():
+                            add_reference_image_button = gr.Button(
+                                "加入参考图列表",
+                                variant="secondary",
+                            )
+                            clear_reference_images_button = gr.Button(
+                                "清空参考图",
+                                variant="secondary",
+                            )
+                    with gr.Row(elem_classes="cf-advanced-section"):
                         mask_image = gr.Image(
                             label="局部修改范围图",
                             type="filepath",
@@ -2906,6 +3076,30 @@ def create_demo(
             inputs=[image_provider],
             outputs=[image_model_status],
         )
+        script_state.change(
+            fn=reference_upload_guide,
+            inputs=[script_state],
+            outputs=[reference_order_guide],
+        )
+        script_state.change(
+            fn=reference_file_order_markdown,
+            inputs=[script_state, reference_images],
+            outputs=[reference_file_order],
+        )
+        add_reference_image_button.click(
+            fn=append_reference_image_for_ui,
+            inputs=[reference_clipboard_image, reference_images],
+            outputs=[reference_images, reference_clipboard_image],
+        )
+        reference_images.change(
+            fn=reference_file_order_markdown,
+            inputs=[script_state, reference_images],
+            outputs=[reference_file_order],
+        )
+        clear_reference_images_button.click(
+            fn=clear_reference_images_for_ui,
+            outputs=[reference_images, reference_clipboard_image],
+        )
         image_provider.change(
             fn=handle_image_provider_change,
             inputs=[image_provider],
@@ -2915,6 +3109,7 @@ def create_demo(
                 image_capabilities,
                 negative_prompt,
                 image_seed,
+                reference_tools,
                 reference_images,
                 mask_image,
                 image_quality,

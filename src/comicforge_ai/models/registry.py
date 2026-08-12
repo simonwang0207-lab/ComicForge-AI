@@ -6,6 +6,7 @@ import os
 from collections.abc import Iterable, Mapping
 
 from comicforge_ai.models.base import TextModelProvider
+from comicforge_ai.models.deepseek_text import DeepSeekTextModel
 from comicforge_ai.models.mock_text import MockTextModel
 from comicforge_ai.models.ollama_text import OllamaTextModel
 from comicforge_ai.models.openai_compatible_text import OpenAICompatibleTextModel
@@ -86,6 +87,9 @@ def build_default_registry(
     generation_timeout = _number_setting(env, "TEXT_MODEL_GENERATION_TIMEOUT", 300)
     status_timeout = _number_setting(env, "TEXT_MODEL_STATUS_TIMEOUT", 10)
     retries = _integer_setting(env, "TEXT_MODEL_MAX_RETRIES", 1)
+    language_repair_attempts = _integer_setting(
+        env, "TEXT_MODEL_LANGUAGE_REPAIR_ATTEMPTS", 2
+    )
     return TextModelRegistry(
         [
             MockTextModel(),
@@ -107,6 +111,7 @@ def build_default_registry(
                 num_predict=_integer_setting(env, "OLLAMA_NUM_PREDICT", 4096),
                 num_ctx=_integer_setting(env, "OLLAMA_NUM_CTX", 8192),
                 max_retries=retries,
+                language_repair_attempts=language_repair_attempts,
             ),
             OpenAICompatibleTextModel(
                 base_url=env.get("OPENAI_COMPATIBLE_BASE_URL", ""),
@@ -119,6 +124,7 @@ def build_default_registry(
                 ),
                 status_timeout=status_timeout,
                 max_retries=retries,
+                language_repair_attempts=language_repair_attempts,
                 max_tokens=_integer_setting(
                     env, "OPENAI_COMPATIBLE_MAX_TOKENS", 4096
                 ),
@@ -128,6 +134,32 @@ def build_default_registry(
                 reasoning_effort=env.get(
                     "OPENAI_COMPATIBLE_REASONING_EFFORT", ""
                 ),
+            ),
+            DeepSeekTextModel(
+                base_url=env.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                api_key=env.get("DEEPSEEK_API_KEY", ""),
+                model=env.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+                connect_timeout=_number_setting(
+                    env, "DEEPSEEK_CONNECT_TIMEOUT", connect_timeout
+                ),
+                generation_timeout=_number_setting(
+                    env, "DEEPSEEK_GENERATION_TIMEOUT", generation_timeout
+                ),
+                review_timeout=_number_setting(
+                    env,
+                    "DEEPSEEK_REVIEW_TIMEOUT",
+                    _number_setting(env, "TEXT_MODEL_REVIEW_TIMEOUT", 90),
+                ),
+                status_timeout=_number_setting(
+                    env, "DEEPSEEK_STATUS_TIMEOUT", status_timeout
+                ),
+                max_retries=retries,
+                language_repair_attempts=language_repair_attempts,
+                max_tokens=_integer_setting(env, "DEEPSEEK_MAX_TOKENS", 32768),
+                max_retry_tokens=_integer_setting(
+                    env, "DEEPSEEK_MAX_RETRY_TOKENS", 65536
+                ),
+                disable_thinking=False,
             ),
         ]
     )

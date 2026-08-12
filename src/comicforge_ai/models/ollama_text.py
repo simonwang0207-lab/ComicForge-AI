@@ -44,9 +44,13 @@ class OllamaTextModel(RemoteTextModelProvider):
         num_ctx: int = 8192,
         timeout: float | None = None,
         max_retries: int = 1,
+        language_repair_attempts: int = 2,
         transport: HttpTransport = request_json,
     ) -> None:
-        super().__init__(max_retries=max_retries)
+        super().__init__(
+            max_retries=max_retries,
+            language_repair_attempts=language_repair_attempts,
+        )
         self.base_url = base_url.strip().rstrip("/")
         self._model_name = model.strip()
         # ``timeout`` is retained for callers from version 0.2.0. New code should
@@ -192,16 +196,29 @@ class OllamaTextModel(RemoteTextModelProvider):
     def _chat_for_review(self, messages: list[dict[str, str]]) -> str:
         return self._chat_with_timeout(messages, self.review_timeout)
 
+    def _chat_for_repair(self, messages: list[dict[str, str]]) -> str:
+        return self._chat_with_timeout(
+            messages,
+            min(self.review_timeout, self.generation_timeout),
+            num_predict=min(self.num_predict, 1024),
+            temperature=0.0,
+        )
+
     def _chat_with_timeout(
         self,
         messages: list[dict[str, str]],
         read_timeout: float,
+        *,
+        num_predict: int | None = None,
+        temperature: float = 0.2,
     ) -> str:
         self.last_thinking_control = "api_think_false"
         try:
             response = self._send_chat(
                 messages,
                 include_think=False,
+                num_predict=num_predict,
+                temperature=temperature,
                 read_timeout=read_timeout,
             )
         except TextModelHttpError as exc:
@@ -221,6 +238,8 @@ class OllamaTextModel(RemoteTextModelProvider):
                 response = self._send_chat(
                     add_no_think_directive(messages),
                     include_think=None,
+                    num_predict=num_predict,
+                    temperature=temperature,
                     read_timeout=read_timeout,
                 )
             except TextModelHttpError as retry_exc:
@@ -229,8 +248,8 @@ class OllamaTextModel(RemoteTextModelProvider):
                 raise
         if str(response.get("done_reason", "")).lower() == "length":
             retry_num_predict = max(
-                self.num_predict,
-                min(self.num_predict * 2, 16384),
+                num_predict or self.num_predict,
+                min((num_predict or self.num_predict) * 2, 16384),
             )
             retry_num_ctx = max(self.num_ctx, retry_num_predict * 2)
             retry_messages = add_truncation_retry_directive(messages)
@@ -251,6 +270,7 @@ class OllamaTextModel(RemoteTextModelProvider):
                 include_think=include_think,
                 num_predict=retry_num_predict,
                 num_ctx=retry_num_ctx,
+                temperature=temperature,
                 read_timeout=read_timeout,
             )
             if str(response.get("done_reason", "")).lower() == "length":
@@ -271,6 +291,7 @@ class OllamaTextModel(RemoteTextModelProvider):
         include_think: bool | None,
         num_predict: int | None = None,
         num_ctx: int | None = None,
+        temperature: float = 0.2,
         read_timeout: float | None = None,
     ) -> dict[str, Any]:
         actual_num_predict = num_predict or self.num_predict
@@ -281,7 +302,7 @@ class OllamaTextModel(RemoteTextModelProvider):
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": 0.2,
+                "temperature": temperature,
                 "num_predict": actual_num_predict,
                 "num_ctx": actual_num_ctx,
             },

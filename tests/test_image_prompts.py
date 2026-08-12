@@ -316,3 +316,54 @@ def test_animagine_prioritizes_story_scene_over_reference_composition() -> None:
     assert "never copy its pose" in request.prompt
     assert "minimal background" not in request.prompt
     assert "detailed story-relevant environment" in request.prompt
+
+
+def test_animagine_reference_identity_overrides_conflicting_text_profile() -> None:
+    project = MockTextModel().generate_project("哪吒参考图", "科幻霓虹", 1)
+    character = project.characters[0]
+    character.visual_prompt = "Young hero with red hair and a blue robe"
+    character.identity_features = ["short red hair", "blue robe"]
+    character.clothing = "blue robe"
+    character.primary_colors = ["red", "blue"]
+    panel = project.panels[0]
+    panel.characters = [character.name]
+    panel.image_prompt = (
+        "A young hero with short red hair and blue robe on a wind fire wheel, "
+        "defending a coastal town at night, low angle action shot"
+    )
+
+    request = build_panel_image_request(
+        project,
+        panel,
+        profile=PROMPT_PROFILE_ANIMAGINE_XL,
+        reference_character_names=(character.name,),
+    )
+
+    assert "REFERENCE IMAGE IDENTITY LOCK" in request.prompt
+    assert "same character as the reference image" in request.prompt
+    assert "preserve identity, outfit, hairstyle and face" in request.prompt
+    assert "red hair" not in request.prompt
+    assert "blue robe" not in request.prompt
+    assert "wind fire wheel" in request.prompt
+    assert "defending a coastal town at night" in request.prompt
+    assert "low angle action shot" in request.prompt
+
+
+def test_animagine_without_reference_keeps_text_character_appearance() -> None:
+    project = MockTextModel().generate_project("无参考图外貌", "科幻霓虹", 1)
+    character = project.characters[0]
+    character.hairstyle = "short red hair"
+    character.clothing = "blue robe"
+    panel = project.panels[0]
+    panel.characters = [character.name]
+    panel.image_prompt = "A young hero with short red hair and blue robe in a harbor"
+
+    request = build_panel_image_request(
+        project,
+        panel,
+        profile=PROMPT_PROFILE_ANIMAGINE_XL,
+    )
+
+    assert "short red hair" in request.prompt
+    assert "blue robe" in request.prompt
+    assert "REFERENCE IMAGE IDENTITY LOCK" not in request.prompt

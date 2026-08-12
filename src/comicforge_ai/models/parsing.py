@@ -8,7 +8,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from comicforge_ai.models.base import TextModelOutputError
+from comicforge_ai.models.base import (
+    TextModelOutputError,
+    VisibleTextLanguageError,
+)
 from comicforge_ai.schemas import (
     ComicLocalization,
     ComicProject,
@@ -51,8 +54,24 @@ _PANEL_SEQUENCE_ALIASES = (
     "index",
     "panel_index",
     "panel_number",
+    "panel_no",
+    "panel_id",
+    "panel",
     "number",
     "序号",
+    "格号",
+    "分格序号",
+    "分镜序号",
+)
+
+_TEXT_INDEX_ALIASES = (
+    "text_index",
+    "item_index",
+    "text_number",
+    "number",
+    "序号",
+    "索引",
+    "文字序号",
 )
 
 _PANEL_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -121,6 +140,54 @@ _PANEL_POSITION_ALIASES = {
     "右下": "bottom_right",
 }
 _TEXT_PRESENTATIONS = {"auto", "bubble", "text_only", "caption", "burst"}
+
+
+def _normalize_panel_position(value: Any) -> str | None:
+    """Map common model spellings to the closed PanelPosition vocabulary."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = re.sub(r"[\s-]+", "_", value.strip().lower())
+    if normalized in _PANEL_POSITIONS:
+        return normalized
+    alias = _PANEL_POSITION_ALIASES.get(normalized)
+    if alias is not None:
+        return alias
+
+    compact = normalized.replace("_", "")
+    semantic_aliases = (
+        (("左上", "topleft", "upperleft"), "top_left"),
+        (("右上", "topright", "upperright"), "top_right"),
+        (("左下", "bottomleft", "lowerleft"), "bottom_left"),
+        (("右下", "bottomright", "lowerright"), "bottom_right"),
+        (("左侧", "middleleft", "centerleft"), "middle_left"),
+        (("右侧", "middleright", "centerright"), "middle_right"),
+        (("上方", "顶部", "topcenter", "uppercenter"), "top_center"),
+        (("下方", "底部", "bottomcenter", "lowercenter", "centerbottom"), "bottom_left"),
+        (("中央", "中间", "center", "middlecenter"), "top_center"),
+    )
+    for markers, position in semantic_aliases:
+        if any(marker in compact for marker in markers):
+            return position
+    return None
+
+
+def _normalize_anchor(value: Any) -> dict[str, float] | None:
+    """Accept numeric anchor strings while discarding ambiguous coordinates."""
+    if not isinstance(value, dict):
+        return None
+    coordinates: dict[str, float] = {}
+    for axis in ("x", "y"):
+        raw = value.get(axis)
+        if isinstance(raw, bool):
+            return None
+        try:
+            coordinate = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not 0 <= coordinate <= 1:
+            return None
+        coordinates[axis] = coordinate
+    return coordinates
 
 
 def extract_json_object(raw_output: str) -> dict[str, Any]:
@@ -261,6 +328,118 @@ def _apply_initial_panel_defaults(payload: dict[str, Any]) -> dict[str, Any]:
         normalized_panels.append(updated)
     normalized["panels"] = normalized_panels
     return _infer_initial_panel_characters(normalized)
+
+
+def _normalize_panel_layout_fields(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Repair optional model layout hints without inventing story content.
+
+    Position hints are advisory, so unknown values are removed and schema
+    defaults can apply. A subshot is retained only when the model supplied a
+    usable visual description (possibly under a known alias or ``focus``).
+    """
+    panels = payload.get("panels")
+    if not isinstance(panels, list):
+        return payload
+    normalized_panels: list[Any] = []
+    for panel in panels:
+        if not isinstance(panel, dict):
+            normalized_panels.append(panel)
+            continue
+        updated = dict(panel)
+
+        positions = updated.get("character_positions")
+        if isinstance(positions, dict):
+            updated["character_positions"] = {
+                str(name): position
+                for name, raw_position in positions.items()
+                if (position := _normalize_panel_position(raw_position)) is not None
+            }
+
+        regions = updated.get("reserved_bubble_regions")
+        if isinstance(regions, list):
+            normalized_regions: list[str] = []
+            for raw_position in regions:
+                position = _normalize_panel_position(raw_position)
+                if position is not None and position not in normalized_regions:
+                    normalized_regions.append(position)
+            updated["reserved_bubble_regions"] = normalized_regions
+
+        text_items = updated.get("text_items")
+        if isinstance(text_items, list):
+            normalized_items: list[Any] = []
+            for item in text_items:
+                if not isinstance(item, dict):
+                    normalized_items.append(item)
+                    continue
+                normalized_item = dict(item)
+                raw_preferred = normalized_item.get(
+                    "preferred_position",
+                    normalized_item.get("position"),
+                )
+                preferred = _normalize_panel_position(raw_preferred)
+                if preferred is None:
+                    normalized_item.pop("preferred_position", None)
+                else:
+                    normalized_item["preferred_position"] = preferred
+                speaker_position = _normalize_panel_position(
+                    normalized_item.get("speaker_position")
+                )
+                if speaker_position is None:
+                    normalized_item.pop("speaker_position", None)
+                else:
+                    normalized_item["speaker_position"] = speaker_position
+                anchor = _normalize_anchor(normalized_item.get("speaker_anchor"))
+                if anchor is None:
+                    normalized_item.pop("speaker_anchor", None)
+                else:
+                    normalized_item["speaker_anchor"] = anchor
+                normalized_items.append(normalized_item)
+            updated["text_items"] = normalized_items
+
+        subshots = updated.get("subshots")
+        if isinstance(subshots, list):
+            normalized_subshots: list[dict[str, Any]] = []
+            for subshot in subshots:
+                if not isinstance(subshot, dict):
+                    continue
+                normalized_subshot = dict(subshot)
+                description = next(
+                    (
+                        str(normalized_subshot[key]).strip()
+                        for key in (
+                            "visual_description",
+                            "description",
+                            "visual",
+                            "shot_description",
+                            "scene",
+                            "action",
+                            "画面描述",
+                            "focus",
+                        )
+                        if normalized_subshot.get(key) is not None
+                        and str(normalized_subshot[key]).strip()
+                    ),
+                    "",
+                )
+                if not description:
+                    continue
+                normalized_subshot["visual_description"] = description
+                position = _normalize_panel_position(
+                    normalized_subshot.get("position")
+                )
+                if position is None:
+                    normalized_subshot.pop("position", None)
+                else:
+                    normalized_subshot["position"] = position
+                normalized_subshots.append(normalized_subshot)
+            updated["subshots"] = normalized_subshots
+
+        normalized_panels.append(updated)
+    normalized = dict(payload)
+    normalized["panels"] = normalized_panels
+    return normalized
 
 
 def _is_empty_storyboard_text(value: Any) -> bool:
@@ -548,27 +727,194 @@ def _validate_user_facing_storyboard(project: ComicProject) -> None:
             "所有分格的 dialogue、narration 和 text_items 均为空；"
             "请根据故事冲突至少生成一项对白、旁白、思考或拟声词"
         )
+    wrong_language_items = sorted(
+        (panel.sequence, index)
+        for panel in project.panels
+        for index, item in enumerate(panel.text_items)
+        if item.type != "sfx"
+        and item.text.strip()
+        and _language_script_ratio(
+            item.text,
+            project.content_language,
+        )
+        < 0.35
+    )
     wrong_language_panels = sorted(
-        {
-            panel.sequence
-            for panel in project.panels
-            for item in panel.text_items
-            if item.type != "sfx"
-            and item.text.strip()
-            and _language_script_ratio(
-                item.text,
-                project.content_language,
-            )
-            < 0.35
-        }
+        {sequence for sequence, _ in wrong_language_items}
     )
     if wrong_language_panels:
         sequences = "、".join(str(item) for item in wrong_language_panels)
-        raise TextModelOutputError(
+        raise VisibleTextLanguageError(
             f"第 {sequences} 格的对白、思考或旁白未使用项目内容语言 "
             f"{project.content_language}；所有可见漫画文字必须使用用户选择的语言，"
-            "只有 image_prompt 使用英文"
+            "只有 image_prompt 使用英文",
+            project=project,
+            panel_sequences=tuple(wrong_language_panels),
+            text_indexes=tuple(wrong_language_items),
         )
+
+
+def apply_visible_text_language_repair(
+    raw_patch: str,
+    draft: ComicProject,
+) -> ComicProject:
+    """Apply an index-based lettering patch without trusting other fields."""
+    payload = extract_json_object(raw_patch)
+    panels = payload.get("panels")
+    if not isinstance(panels, list) or not panels:
+        raise TextModelOutputError("可见文字修复结果缺少 panels 数组")
+
+    updated = draft.model_copy(deep=True)
+    panel_by_sequence = {panel.sequence: panel for panel in updated.panels}
+    expected = {
+        (panel.sequence, index)
+        for panel in updated.panels
+        for index, text_item in enumerate(panel.text_items)
+        if text_item.type != "sfx"
+        and text_item.text.strip()
+        and _language_script_ratio(
+            text_item.text,
+            updated.content_language,
+        )
+        < 0.35
+    }
+    applied: set[tuple[int, int]] = set()
+    touched_sequences: set[int] = set()
+    expected_sequences = {sequence for sequence, _ in expected}
+
+    for panel_patch_index, panel_patch in enumerate(panels):
+        if not isinstance(panel_patch, dict):
+            raise TextModelOutputError("可见文字修复的 panel 必须是对象")
+        raw_sequence = _first_present_value(
+            panel_patch,
+            ("sequence", *_PANEL_SEQUENCE_ALIASES),
+        )
+        if raw_sequence is None and len(panels) == 1 and len(expected_sequences) == 1:
+            sequence = next(iter(expected_sequences))
+        else:
+            sequence = _coerce_repair_integer(
+                raw_sequence,
+                error_message=(
+                    "可见文字修复 panel 缺少有效 sequence"
+                    f"（panels[{panel_patch_index}]）"
+                ),
+            )
+        panel = panel_by_sequence.get(sequence)
+        if panel is None:
+            raise TextModelOutputError(
+                f"可见文字修复包含未知分格 sequence={sequence}"
+            )
+        texts = _first_present_value(
+            panel_patch,
+            ("texts", "text_items", "items", "文字", "修复文字"),
+        )
+        if not isinstance(texts, list) or not texts:
+            raise TextModelOutputError(
+                f"第 {sequence} 格可见文字修复缺少 texts 数组"
+            )
+        expected_indexes = {
+            index for expected_sequence, index in expected
+            if expected_sequence == sequence
+        }
+        for text_patch_index, text_patch in enumerate(texts):
+            if not isinstance(text_patch, dict):
+                raise TextModelOutputError(
+                    f"第 {sequence} 格 texts 项必须是对象"
+                )
+            raw_index = _first_present_value(
+                text_patch,
+                ("index", *_TEXT_INDEX_ALIASES),
+            )
+            if raw_index is None and len(texts) == 1 and len(expected_indexes) == 1:
+                index = next(iter(expected_indexes))
+            else:
+                index = _coerce_repair_integer(
+                    raw_index,
+                    error_message=(
+                        f"第 {sequence} 格文字修复缺少有效 index"
+                        f"（texts[{text_patch_index}]）"
+                    ),
+                )
+            key = (sequence, index)
+            if key in applied:
+                raise TextModelOutputError(
+                    f"第 {sequence} 格文字索引 {index} 被重复修复"
+                )
+            if not 0 <= index < len(panel.text_items):
+                raise TextModelOutputError(
+                    f"第 {sequence} 格文字索引 {index} 超出范围"
+                )
+            text = _first_present_value(
+                text_patch,
+                (
+                    "text",
+                    "translated_text",
+                    "revised_text",
+                    "fixed_text",
+                    "译文",
+                    "修复文本",
+                    "文字",
+                ),
+            )
+            if not isinstance(text, str) or not text.strip():
+                raise TextModelOutputError(
+                    f"第 {sequence} 格文字索引 {index} 的修复文本为空"
+                )
+            panel.text_items[index].text = text.strip()
+            applied.add(key)
+            touched_sequences.add(sequence)
+
+    missing = sorted(expected - applied)
+    if missing:
+        formatted = "、".join(f"{sequence}:{index}" for sequence, index in missing)
+        raise TextModelOutputError(
+            f"可见文字修复未覆盖全部错误文字索引：{formatted}"
+        )
+
+    for sequence in touched_sequences:
+        panel = panel_by_sequence[sequence]
+        panel.dialogue = " ".join(
+            f"{item.speaker}：{item.text}" if item.speaker else item.text
+            for item in panel.text_items
+            if item.type in {"speech", "thought"}
+        )
+        panel.narration = " ".join(
+            item.text for item in panel.text_items if item.type == "narration"
+        )
+
+    _validate_user_facing_storyboard(updated)
+    _validate_dialogue_diversity(updated)
+    return updated
+
+
+def _first_present_value(
+    payload: dict[str, Any],
+    field_names: tuple[str, ...],
+) -> Any:
+    for field_name in field_names:
+        if field_name in payload:
+            return payload[field_name]
+    return None
+
+
+def _coerce_repair_integer(value: Any, *, error_message: str) -> int:
+    """Accept common model spellings while rejecting ambiguous identifiers."""
+    if isinstance(value, bool):
+        raise TextModelOutputError(error_message)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdecimal():
+            return int(stripped)
+        match = re.fullmatch(
+            r"(?:(?:panel|text|item)[_\s-]*|第\s*)?(\d+)\s*(?:格|项)?",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return int(match.group(1))
+    raise TextModelOutputError(error_message)
 
 
 def _validate_required_shape(payload: dict[str, Any]) -> None:
@@ -767,25 +1113,140 @@ def _expand_review_patch(
     for key, value in patch.items():
         if key != "panels":
             merged[key] = value
-    if isinstance(panel_patch, list):
+    if "panels" in patch:
+        panel_patch = _validate_review_panel_patch(
+            panel_patch,
+            draft,
+            location="project_patch.panels",
+        )
         panels_by_sequence = {
             item["sequence"]: item for item in merged["panels"]
         }
         for item in panel_patch:
-            if not isinstance(item, dict):
-                continue
-            sequence = item.get("sequence")
-            existing = panels_by_sequence.get(sequence)
-            if existing is None:
-                # Preserve the invalid addition so normal panel-count/sequence
-                # validation reports it instead of silently ignoring it.
-                merged["panels"].append(item)
-                continue
-            existing.update(item)
+            panels_by_sequence[item["sequence"]].update(item)
     for key in ("review_notes", "script_reviewed"):
         if key in payload:
             merged[key] = payload[key]
     return merged
+
+
+def _validate_review_panel_patch(
+    panels: Any,
+    draft: ComicProject,
+    *,
+    location: str,
+) -> list[dict[str, Any]]:
+    """Validate that reviewer panel edits map unambiguously to draft panels."""
+    if not isinstance(panels, list):
+        raise TextModelOutputError(
+            f"审查稿 panels 无法安全合并：{location} 必须是数组"
+        )
+
+    known_sequences = {panel.sequence for panel in draft.panels}
+    seen_sequences: set[int] = set()
+    validated: list[dict[str, Any]] = []
+    for index, panel in enumerate(panels):
+        if not isinstance(panel, dict):
+            raise TextModelOutputError(
+                f"审查稿 panels 无法安全合并：{location}[{index}] 必须是对象"
+            )
+        sequence = panel.get("sequence")
+        if type(sequence) is not int:
+            raise TextModelOutputError(
+                "审查稿 panels 无法安全合并："
+                f"{location}[{index}].sequence 缺失或不是整数"
+            )
+        if sequence in seen_sequences:
+            raise TextModelOutputError(
+                "审查稿 panels 无法安全合并："
+                f"{location} 中 sequence={sequence} 重复"
+            )
+        if sequence not in known_sequences:
+            raise TextModelOutputError(
+                "审查稿 panels 无法安全合并："
+                f"{location} 中 sequence={sequence} 不属于已验证初稿"
+            )
+        seen_sequences.add(sequence)
+        validated.append(panel)
+    return validated
+
+
+def _normalize_partial_review_panels_to_patch(
+    payload: dict[str, Any],
+    draft: ComicProject,
+) -> dict[str, Any]:
+    """Treat a valid top-level panel subset as the patch small reviewers intended.
+
+    The review prompt requires ``project_patch``, but small models sometimes return
+    ``panels`` at the top level while including only the panels they changed. Panel
+    deletion is not permitted during review, so a unique subset of known sequences
+    can be merged safely into the already validated draft. Invalid subsets are
+    rejected with a specific safe-merge error so the service
+    can visibly retain the validated draft instead of reporting only a generic
+    panel-count mismatch.
+    """
+    if isinstance(payload.get("project_patch"), dict):
+        return payload
+    if "panels" not in payload:
+        return payload
+    panels = payload["panels"]
+    if not isinstance(panels, list):
+        raise TextModelOutputError(
+            "审查稿 panels 无法安全合并：顶层 panels 必须是数组"
+        )
+    if len(panels) > draft.panel_count:
+        raise TextModelOutputError(
+            "审查稿 panels 无法安全合并："
+            f"返回了 {len(panels)} 格，但已验证初稿只有 {draft.panel_count} 格"
+        )
+    if len(panels) == draft.panel_count:
+        return payload
+    panels = _validate_review_panel_patch(
+        panels,
+        draft,
+        location="panels",
+    )
+    patch_keys = {
+        "title",
+        "title_candidates",
+        "story",
+        "characters",
+        "story_bible",
+        "panels",
+    }
+    normalized = {
+        key: value
+        for key, value in payload.items()
+        if key not in patch_keys
+    }
+    normalized["project_patch"] = {
+        key: value for key, value in payload.items() if key in patch_keys
+    }
+    normalized["project_patch"]["panels"] = panels
+    return normalized
+
+
+def _reject_ambiguous_top_level_review_panel_subset(
+    payload: dict[str, Any],
+    draft: ComicProject,
+) -> None:
+    """Require an explicit sequence before generic normalization adds positions."""
+    if isinstance(payload.get("project_patch"), dict):
+        return
+    panels = payload.get("panels")
+    if not isinstance(panels, list) or len(panels) >= draft.panel_count:
+        return
+    for index, panel in enumerate(panels):
+        if not isinstance(panel, dict):
+            continue
+        has_sequence = "sequence" in panel or any(
+            alias in panel for alias in _PANEL_SEQUENCE_ALIASES
+        )
+        if not has_sequence:
+            raise TextModelOutputError(
+                "审查稿 panels 无法安全合并："
+                f"panels[{index}].sequence 缺失，无法判断要修改初稿中的哪一格"
+            )
 
 
 def _normalize_review_text_items(
@@ -845,25 +1306,22 @@ def _normalize_review_text_items(
             speaker = item.get("speaker")
             if isinstance(speaker, str) and speaker.strip():
                 normalized_item["speaker"] = speaker.strip()
-            position = item.get("preferred_position") or item.get("position")
-            if position in _PANEL_POSITIONS:
+            position = _normalize_panel_position(
+                item.get("preferred_position") or item.get("position")
+            )
+            if position is not None:
                 normalized_item["preferred_position"] = position
-            speaker_position = item.get("speaker_position")
-            if speaker_position in _PANEL_POSITIONS:
+            speaker_position = _normalize_panel_position(
+                item.get("speaker_position")
+            )
+            if speaker_position is not None:
                 normalized_item["speaker_position"] = speaker_position
             presentation = item.get("presentation")
             if presentation in _TEXT_PRESENTATIONS:
                 normalized_item["presentation"] = presentation
-            anchor = item.get("speaker_anchor")
-            if isinstance(anchor, dict):
-                x, y = anchor.get("x"), anchor.get("y")
-                if (
-                    isinstance(x, (int, float))
-                    and isinstance(y, (int, float))
-                    and 0 <= x <= 1
-                    and 0 <= y <= 1
-                ):
-                    normalized_item["speaker_anchor"] = {"x": x, "y": y}
+            anchor = _normalize_anchor(item.get("speaker_anchor"))
+            if anchor is not None:
+                normalized_item["speaker_anchor"] = anchor
             normalized_items.append(normalized_item)
         if normalized_items:
             updated_panel["text_items"] = normalized_items
@@ -911,12 +1369,7 @@ def _normalize_review_panel_positions(
         if isinstance(positions, dict):
             normalized_positions: dict[str, str] = {}
             for name, raw_position in positions.items():
-                value = str(raw_position).strip().lower()
-                position = (
-                    value
-                    if value in _PANEL_POSITIONS
-                    else _PANEL_POSITION_ALIASES.get(value)
-                )
+                position = _normalize_panel_position(raw_position)
                 if position is None and source is not None:
                     position = source.character_positions.get(str(name))
                 if position is not None:
@@ -926,12 +1379,7 @@ def _normalize_review_panel_positions(
         if isinstance(regions, list):
             normalized_regions: list[str] = []
             for raw_position in regions:
-                value = str(raw_position).strip().lower()
-                position = (
-                    value
-                    if value in _PANEL_POSITIONS
-                    else _PANEL_POSITION_ALIASES.get(value)
-                )
+                position = _normalize_panel_position(raw_position)
                 if position is not None and position not in normalized_regions:
                     normalized_regions.append(position)
             if not normalized_regions and source is not None:
@@ -957,6 +1405,7 @@ def parse_comic_project(
     """Safely parse provider output and enforce the expected request context."""
     payload = _normalize_project_payload(extract_json_object(raw_output))
     payload = _apply_initial_panel_defaults(payload)
+    payload = _normalize_panel_layout_fields(payload)
     payload = _normalize_panel_character_names(payload)
     payload = _normalize_panel_display_language(payload, language, source_story)
     payload = _normalize_story_bible_lists(payload)
@@ -986,7 +1435,10 @@ def parse_comic_project(
 
 def parse_reviewed_project(raw_output: str, draft: ComicProject) -> ComicProject:
     """Parse a reviewed script while preserving immutable request context."""
-    payload = _normalize_project_payload(extract_json_object(raw_output))
+    payload = extract_json_object(raw_output)
+    _reject_ambiguous_top_level_review_panel_subset(payload, draft)
+    payload = _normalize_project_payload(payload)
+    payload = _normalize_partial_review_panels_to_patch(payload, draft)
     payload = _expand_review_patch(payload, draft)
     payload = _normalize_panel_character_names(payload)
     payload = _normalize_story_bible_lists(payload)
@@ -996,6 +1448,7 @@ def parse_reviewed_project(raw_output: str, draft: ComicProject) -> ComicProject
     payload = _inherit_review_panel_fields(payload, draft)
     payload = _normalize_review_text_items(payload, draft)
     payload = _normalize_review_panel_positions(payload, draft)
+    payload = _normalize_panel_layout_fields(payload)
     payload = _normalize_panel_display_language(payload, draft.content_language)
     if not isinstance(payload.get("title"), str) or not payload["title"].strip():
         payload["title"] = draft.title

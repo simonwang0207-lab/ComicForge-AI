@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from provider_fixtures import comic_payload
 
 from comicforge_ai.models.base import (
@@ -224,6 +225,324 @@ def test_openai_compatible_provider_uses_mock_http_response() -> None:
 
     assert len(project.panels) == 2
     assert seen_authorization == ["Bearer placeholder"] * 2
+
+
+def test_openai_compatible_repairs_only_wrong_language_lettering() -> None:
+    calls: list[dict[str, object]] = []
+    invalid = comic_payload(2)
+    for index, panel in enumerate(invalid["panels"], start=1):
+        panel["image_prompt"] = f"unique english image prompt {index}"
+        panel["dialogue"] = f"English dialogue {index}"
+        panel["narration"] = ""
+        panel["text_items"] = [
+            {
+                "type": "speech",
+                "speaker": "小雨",
+                "text": f"English dialogue {index}",
+            }
+        ]
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        assert method == "POST"
+        assert payload is not None
+        calls.append(payload)
+        content: object
+        if len(calls) == 1:
+            content = invalid
+        else:
+            messages = payload["messages"]
+            assert isinstance(messages, list)
+            repair_instruction = str(messages[-1]["content"])
+            assert "只能返回指定索引的文字补丁" in str(
+                messages[0]["content"]
+            )
+            assert "不得修改 sequence、index、type 或 speaker" in repair_instruction
+            assert "unique english image prompt" not in repair_instruction
+            content = {
+                "panels": [
+                    {
+                        "sequence": 1,
+                        "texts": [{"index": 0, "text": "我会保护大家！"}],
+                    },
+                    {
+                        "sequence": 2,
+                        "texts": [{"index": 0, "text": "我们继续前进！"}],
+                    },
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": json.dumps(content, ensure_ascii=False)
+                    },
+                }
+            ]
+        }
+
+    provider = OpenAICompatibleTextModel(
+        base_url="https://example.invalid/v1",
+        api_key="placeholder",
+        model="qwen3:4b",
+        max_retries=1,
+        transport=fake_transport,
+    )
+
+    project = provider.generate_project(
+        "中文文字专项修复",
+        "漫画",
+        2,
+        language="zh-CN",
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["temperature"] == 0.2
+    assert calls[0]["max_tokens"] == 4096
+    assert calls[1]["temperature"] == 0.0
+    assert calls[1]["max_tokens"] == 1024
+    assert [panel.text_items[0].text for panel in project.panels] == [
+        "我会保护大家！",
+        "我们继续前进！",
+    ]
+    assert [panel.image_prompt for panel in project.panels] == [
+        "unique english image prompt 1",
+        "unique english image prompt 2",
+    ]
+
+
+def test_openai_compatible_retries_only_still_wrong_language_lettering() -> None:
+    payloads: list[dict[str, object]] = []
+    invalid = comic_payload(2)
+    for index, panel in enumerate(invalid["panels"], start=1):
+        panel["dialogue"] = f"English dialogue {index}"
+        panel["narration"] = ""
+        panel["text_items"] = [
+            {
+                "type": "speech",
+                "speaker": "小雨",
+                "text": f"English dialogue {index}",
+            }
+        ]
+    responses: list[object] = [
+        invalid,
+        {
+            "panels": [
+                {
+                    "sequence": 1,
+                    "texts": [{"index": 0, "text": "我会保护大家！"}],
+                },
+                {
+                    "sequence": 2,
+                    "texts": [{"index": 0, "text": "Still English"}],
+                },
+            ]
+        },
+        {
+            "panels": [
+                {
+                    "sequence": 2,
+                    "texts": [{"index": 0, "text": "我们继续前进！"}],
+                }
+            ]
+        },
+    ]
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        assert method == "POST"
+        assert payload is not None
+        payloads.append(payload)
+        content = responses[len(payloads) - 1]
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": json.dumps(content, ensure_ascii=False)
+                    },
+                }
+            ]
+        }
+
+    provider = OpenAICompatibleTextModel(
+        base_url="https://example.invalid/v1",
+        api_key="placeholder",
+        model="qwen3:4b",
+        max_retries=1,
+        language_repair_attempts=2,
+        transport=fake_transport,
+    )
+
+    project = provider.generate_project(
+        "中文文字二次专项修复",
+        "漫画",
+        2,
+        language="zh-CN",
+    )
+
+    assert len(payloads) == 3
+    assert [payload["temperature"] for payload in payloads] == [0.2, 0.0, 0.0]
+    third_messages = payloads[2]["messages"]
+    assert isinstance(third_messages, list)
+    third_prompt = "\n".join(
+        str(message.get("content", ""))
+        for message in third_messages
+        if isinstance(message, dict)
+    )
+    assert '"sequence":2' in third_prompt
+    assert "Still English" in third_prompt
+    assert "我会保护大家" not in third_prompt
+    assert [panel.text_items[0].text for panel in project.panels] == [
+        "我会保护大家！",
+        "我们继续前进！",
+    ]
+
+
+def test_openai_compatible_reports_exhausted_language_repair_clearly() -> None:
+    invalid = comic_payload(1)
+    invalid["panels"][0]["dialogue"] = "Still English"
+    invalid["panels"][0]["narration"] = ""
+    invalid["panels"][0]["text_items"] = [
+        {
+            "type": "speech",
+            "speaker": "小雨",
+            "text": "Still English",
+        }
+    ]
+    call_count = 0
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        nonlocal call_count
+        call_count += 1
+        content: object = invalid
+        if call_count > 1:
+            content = {
+                "panels": [
+                    {
+                        "sequence": 1,
+                        "texts": [{"index": 0, "text": "Still English"}],
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": json.dumps(content, ensure_ascii=False)
+                    },
+                }
+            ]
+        }
+
+    provider = OpenAICompatibleTextModel(
+        base_url="https://example.invalid/v1",
+        api_key="placeholder",
+        model="qwen3:4b",
+        max_retries=1,
+        language_repair_attempts=2,
+        transport=fake_transport,
+    )
+
+    try:
+        provider.generate_project("中文修复失败提示", "漫画", 1, language="zh-CN")
+    except TextModelOutputError as exc:
+        assert "可见漫画文字专项修复已执行 2 次" in str(exc)
+    else:
+        raise AssertionError("Expected TextModelOutputError")
+
+    assert call_count == 3
+
+
+def test_language_repair_logs_safe_response_structure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    invalid = comic_payload(2)
+    for index, panel in enumerate(invalid["panels"], start=1):
+        panel["dialogue"] = f"Sensitive English dialogue {index}"
+        panel["narration"] = ""
+        panel["text_items"] = [
+            {
+                "type": "speech",
+                "speaker": "小雨",
+                "text": f"Sensitive English dialogue {index}",
+            }
+        ]
+    call_count = 0
+
+    def fake_transport(
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        payload: dict[str, object] | None,
+        timeout: HttpTimeout,
+    ) -> dict[str, object]:
+        nonlocal call_count
+        call_count += 1
+        content: object = invalid
+        if call_count > 1:
+            content = {
+                "panels": [
+                    {
+                        "unexpected_sequence": 1,
+                        "texts": [{"index": 0, "text": "第一格中文"}],
+                    },
+                    {
+                        "unexpected_sequence": 2,
+                        "texts": [{"index": 0, "text": "第二格中文"}],
+                    },
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": json.dumps(content, ensure_ascii=False)
+                    },
+                }
+            ]
+        }
+
+    provider = OpenAICompatibleTextModel(
+        base_url="https://example.invalid/v1",
+        api_key="placeholder",
+        model="qwen3:4b",
+        max_retries=0,
+        language_repair_attempts=1,
+        transport=fake_transport,
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(TextModelOutputError):
+        provider.generate_project(
+            "终端结构日志",
+            "漫画",
+            2,
+            language="zh-CN",
+        )
+
+    log_text = caplog.text
+    assert "Visible-text repair output rejected" in log_text
+    assert "unexpected_sequence" in log_text
+    assert "Sensitive English dialogue" not in log_text
 
 
 def test_openai_compatible_qwen3_disables_thinking_for_ollama_endpoint() -> None:

@@ -281,6 +281,82 @@ panels 必须恰好包含 {panel_count} 个对象，sequence 从 1 连续编号�
     return messages
 
 
+def build_visible_text_language_repair_messages(
+    project: ComicProject,
+    text_indexes: tuple[tuple[int, int], ...],
+) -> list[dict[str, str]]:
+    """Request a tiny lettering-only patch without regenerating the project."""
+    requested = set(text_indexes)
+    payload = {
+        "content_language": project.content_language,
+        "panels": [
+            {
+                "sequence": panel.sequence,
+                "texts": [
+                    {
+                        "index": index,
+                        "type": item.type,
+                        "speaker": item.speaker,
+                        "text": item.text,
+                    }
+                    for index, item in enumerate(panel.text_items)
+                    if (panel.sequence, index) in requested
+                ],
+            }
+            for panel in project.panels
+            if any(sequence == panel.sequence for sequence, _ in requested)
+        ],
+    }
+    compact_payload = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    response_template = {
+        "panels": [
+            {
+                "sequence": panel_payload["sequence"],
+                "texts": [
+                    {
+                        "index": text_payload["index"],
+                        "text": "在这里填写修复后的文字",
+                    }
+                    for text_payload in panel_payload["texts"]
+                ],
+            }
+            for panel_payload in payload["panels"]
+        ]
+    }
+    compact_template = json.dumps(
+        response_template,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    user_prompt = f"""以下漫画文字没有使用{LANGUAGE_NAMES[project.content_language]}：
+{compact_payload}
+
+只修复 texts 中的 text，不得修改 sequence、index、type 或 speaker，不得增加、删除、
+合并或重排文字项。保持原意和人物语气，输出简短自然、适合漫画气泡的
+{LANGUAGE_NAMES[project.content_language]}文字。不要返回标题、故事、角色、场景、动作、
+image_prompt 或其他项目字段。
+
+只输出一个 JSON 对象。字段名必须严格使用英文 panels、sequence、texts、index、text。
+本次响应必须原样保留下面模板里的 sequence 和 index，只替换 text 的值：
+{compact_template}
+必须覆盖输入中列出的每个 sequence 和每个 index。不要解释，不要使用 Markdown。
+"""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是漫画文字本地化修复器。你只能返回指定索引的文字补丁，"
+                "不能重写项目结构或绘图提示词。"
+            ),
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+
 def build_story_review_messages(project: ComicProject) -> list[dict[str, str]]:
     """Request a fact-aware review using a compact, narrative-only snapshot."""
     requirements = [

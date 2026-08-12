@@ -42,12 +42,17 @@ class OpenAICompatibleTextModel(RemoteTextModelProvider):
         status_timeout: float = 10,
         timeout: float | None = None,
         max_retries: int = 1,
+        language_repair_attempts: int = 2,
         max_tokens: int = 4096,
+        max_retry_tokens: int = 16384,
         disable_thinking: bool | None = None,
         reasoning_effort: str = "",
         transport: HttpTransport = request_json,
     ) -> None:
-        super().__init__(max_retries=max_retries)
+        super().__init__(
+            max_retries=max_retries,
+            language_repair_attempts=language_repair_attempts,
+        )
         self.base_url = base_url.strip().rstrip("/")
         self.api_key = api_key.strip()
         self._model_name = model.strip()
@@ -58,6 +63,7 @@ class OpenAICompatibleTextModel(RemoteTextModelProvider):
         self.review_timeout = max(0.1, review_timeout)
         self.status_timeout = max(0.1, status_timeout)
         self.max_tokens = max(256, int(max_tokens))
+        self.max_retry_tokens = max(self.max_tokens, int(max_retry_tokens))
         self.disable_thinking = (
             "qwen3" in self._model_name.lower()
             if disable_thinking is None
@@ -217,23 +223,39 @@ class OpenAICompatibleTextModel(RemoteTextModelProvider):
     def _chat_for_review(self, messages: list[dict[str, str]]) -> str:
         return self._chat_with_timeout(messages, self.review_timeout)
 
+    def _chat_for_repair(self, messages: list[dict[str, str]]) -> str:
+        return self._chat_with_timeout(
+            messages,
+            min(self.review_timeout, self.generation_timeout),
+            max_tokens=min(self.max_tokens, 1024),
+            temperature=0.0,
+        )
+
     def _chat_with_timeout(
         self,
         messages: list[dict[str, str]],
         read_timeout: float,
+        *,
+        max_tokens: int | None = None,
+        temperature: float = 0.2,
     ) -> str:
         request_messages = (
             add_no_think_directive(messages)
             if self.disable_thinking
             else [message.copy() for message in messages]
         )
+        request_max_tokens = max_tokens or self.max_tokens
         response = self._chat_response(
             request_messages,
-            self.max_tokens,
+            request_max_tokens,
             read_timeout,
+            temperature=temperature,
         )
         if self._response_was_truncated(response):
-            retry_max_tokens = min(max(self.max_tokens * 2, 8192), 16384)
+            retry_max_tokens = min(
+                max(request_max_tokens * 2, 2048),
+                self.max_retry_tokens,
+            )
             retry_messages = add_truncation_retry_directive(messages)
             if self.disable_thinking:
                 retry_messages = add_no_think_directive(retry_messages)
@@ -247,6 +269,7 @@ class OpenAICompatibleTextModel(RemoteTextModelProvider):
                 retry_messages,
                 retry_max_tokens,
                 read_timeout,
+                temperature=temperature,
             )
             if self._response_was_truncated(response):
                 raise TextModelOutputError(
@@ -260,12 +283,14 @@ class OpenAICompatibleTextModel(RemoteTextModelProvider):
         request_messages: list[dict[str, str]],
         max_tokens: int,
         read_timeout: float | None = None,
+        *,
+        temperature: float = 0.2,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._model_name,
             "messages": request_messages,
             # Structured project JSON benefits from deterministic output.
-            "temperature": 0.2,
+            "temperature": temperature,
             "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
         }

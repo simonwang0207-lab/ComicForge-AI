@@ -78,14 +78,18 @@
 - [x] Add credential-safe one-image smoke-test script
 - [x] Add fully offline HTTP Mock tests for P0 protocols and failure behavior
 
-## Image Provider P1 — not registered until complete
+## Image Provider P1
 
-- [ ] Gemini Image Provider
+- [x] Implement and register Gemini Image Provider with no-cost fake transport tests
   - Environment: `GEMINI_API_KEY`, `GEMINI_IMAGE_MODEL`
-  - Protocol: Google Generative Language `models/{model}:generateContent`;
-    normalize image `inlineData` and support reference-image content parts
-  - Acceptance: text-to-image, reference image, base64 validation, 401/429/5xx,
-    timeout, safety rejection, redaction, and strict-mode tests
+  - Added official `interactions` and compatible `generate-content` protocol modes
+  - Direct gateway smoke tests completed for one text-to-image request and one single-reference request; ComicForge front-end end-to-end acceptance remains pending
+  - Protocol: Google Generative Language `/v1beta/interactions`; normalize inline
+    image content, support ordered reference-image inputs, and persist only local files
+  - [x] Offline acceptance: text-to-image payload, reference image, base64 validation,
+    local PNG save, registry configuration, provenance, and no base64 persistence
+  - [ ] Real acceptance: API authentication, strict single image, reference-image
+    identity A/B test, 401/429/5xx, timeout, safety rejection, and four-panel run
 - [ ] DashScope Image Provider
   - Environment: `DASHSCOPE_API_KEY`, `DASHSCOPE_IMAGE_MODEL`
   - Protocol: official DashScope image-synthesis/multimodal generation endpoint;
@@ -174,8 +178,12 @@
 - [x] Add irregular bubble outlines and rotated SFX
 - [ ] Add perspective SFX and selectable comic-lettering font packs
 - [x] Add an Animagine XL + IPAdapter character-reference workflow for ComfyUI
-- [x] Reuse the first generated subject panel as a ComfyUI reference when no upload is provided
-- [x] Restrict generic ComfyUI character references to single-character panels so story scenes keep their composition
+- [x] Initially reuse the first generated subject panel as a ComfyUI reference; retire this strategy after testing showed that a story panel leaks its pose, background, and close-up framing into later panels
+- [x] Require explicit clean character references for ComfyUI instead of silently treating a finished story panel as an identity reference
+- [x] Guide ordered character-reference upload in the UI, support batch import/reordering and clipboard append, bind by story-bible order, and persist the actual referenced character names per panel
+- [x] Restrict whole-image ComfyUI references to single-character close/medium shots; bypass them for wide, establishing, aerial, environment, crowd, and multi-character panels
+- [x] Make uploaded reference identity authoritative over conflicting generated character traits and expose a scrollable ordered upload list
+- [x] Normalize a valid top-level review panel subset into a sequence-based patch without weakening panel-count validation
 - [x] Normalize compact text-provider storyboards into a provider-independent panel contract before image generation
 - [x] Allow a separately selected script-review Provider
 
@@ -200,7 +208,10 @@
 - [ ] Add failed-panel resume that reuses successful panels instead of restarting the full page
 - [ ] Maintain a repeatable Recraft four-panel and ComfyUI strict smoke acceptance checklist
 - [ ] Continue provider-independent review normalization without weakening required first-draft fields
+- [ ] Upgrade the ComfyUI API Workflow to multi-IPAdapter or regional conditioning for independent identities in multi-character panels
 - [x] Send a compact narrative-only review snapshot and separate review timeout from normal text generation
+- [x] Repair wrong-language comic lettering with a minimal sequence/index patch instead of regenerating the complete project JSON
+- [x] Make lettering repair deterministic and bounded, retrying only indexes that remain in the wrong content language
 
 ### P1 — Quality and editing
 
@@ -213,4 +224,6 @@
 
 - [ ] Add authenticated task queues, user isolation, remote storage, and a controlled deployment path
 - [ ] Real-generation test each currently unaccepted cloud Provider with explicit user budget approval
-- [ ] Evaluate the unregistered Gemini, DashScope, Volcengine Ark, Replicate, and xAI candidates one at a time
+- [x] Research DeepSeek/Gemini and add separate registry-driven Providers with offline tests
+- [ ] Configure and real-accept DeepSeek + Gemini with explicit user budget approval
+- [ ] Evaluate the unregistered DashScope, Volcengine Ark, Replicate, and xAI candidates one at a time
