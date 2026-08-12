@@ -1,175 +1,259 @@
 # ComicForge AI
 
-> 把故事创意、结构化分镜、多模型生图、本地排字与漫画导出组织成一条可检查、可编辑、可追溯的制作流程。
+> 一个将故事创作、剧本审查、结构化分镜、多模型生图、本地排字与漫画导出整合到同一工作流中的 AI 辅助漫画制作平台。
 
 ![ComicForge AI 工作区](docs/assets/project_delivery/01.png)
 
-ComicForge AI 是一个基于 **Python 3.11 + Gradio** 的 AI 辅助漫画制作平台。用户输入主题、故事梗概或完整剧本后，可以分别选择文本创作模型、剧本审查模型和图片生成模型，完成从故事设计到漫画成品的单页制作闭环。
+ComicForge AI 基于 **Python 3.11** 和 **Gradio** 开发。用户可以分别选择文本创作模型、剧本审查模型和图片生成模型，把自然语言故事转换为可检查、可编辑、可追溯的漫画项目。
 
-与直接调用一个模型相比，本项目不仅返回一段文本或一张图片，还负责结构化分镜、结果校验、角色参考图映射、逐格生成、本地绘制对白、页面排版、局部重生成、版本回退以及生成记录保存。
+项目可以在不配置 API Key、不安装本地大模型的情况下，通过内置 Mock Provider 完成离线演示。Ollama、ComfyUI 和各云端 API 均为可选能力，由使用者按需配置。
 
-## 项目亮点
+## 目录
 
-- **完整创作闭环**：故事输入 → 剧本初稿 → 独立审查 → 分镜确认 → 逐格生图 → 本地排字 → 页面组合 → PNG/PDF 导出。
-- **模型自由组合**：文本创作、剧本审查和图片生成互相独立，可按质量、速度、成本和本机条件组合 Provider。
-- **本地与云端并存**：支持离线 Mock、本地 Ollama、本地 ComfyUI，以及 DeepSeek、Gemini、Recraft 等云端路线。
-- **1–20 格前端创作**：界面可选择 1–20 格，不把核心数据结构固定为四格或八格；支持传统漫画页、规则网格、竖向条漫和自定义画框。
-- **漫画文字由程序绘制**：图片模型只负责无文字画面；对白、思考、旁白和拟声词由 Pillow 在本地绘制，减少乱码并允许重新排字。
-- **角色参考图工作流**：参考图按 Story Bible 角色顺序映射；支持批量导入、粘贴和拖动排序，并针对单人镜头构造避免外貌冲突的图片 Prompt。
-- **可恢复的局部修改**：可只重新生成不满意的一格，原图进入版本历史并可回退，不必重新支付整页生成成本。
-- **失败不会被掩盖**：界面区分连接失败、超时、结构校验失败、审查未应用和 Mock 回退，并显示实际 Provider、模型和耗时。
-- **结果可复现和审计**：`project.json` 保存分镜、最终 Prompt、参考图角色、Provider、模型、尺寸、耗时、request ID、seed、错误和 fallback 状态。
-- **无密钥也能运行**：Mock Text + Mock Image 可离线演示完整流程，自动化测试不会访问真实外部 API。
+- [最快启动](#最快启动)
+- [第一次使用](#第一次使用)
+- [主要功能](#主要功能)
+- [系统工作流程](#系统工作流程)
+- [Provider 支持状态](#provider-支持状态)
+- [配置真实模型](#配置真实模型)
+- [输出文件与项目重载](#输出文件与项目重载)
+- [项目结构](#项目结构)
+- [测试与开发命令](#测试与开发命令)
+- [常见问题](#常见问题)
+- [当前限制](#当前限制)
+- [文档导航](#文档导航)
 
-## 最终效果
+## 最快启动
 
-下面是项目生成并由程序本地添加漫画文字、完成页面组合的示例：
+### 环境要求
 
-![ComicForge AI 漫画示例](docs/assets/project_delivery/22.png)
+- Python `>=3.11,<3.12`，推荐 Python 3.11 64 位
+- Windows、macOS 或 Linux
+- 建议至少预留 2 GB 磁盘空间用于 Python 环境；本地模型需要额外空间
 
-> 生成式模型存在随机性，示例效果不代表每次请求都能获得完全相同的角色一致性和构图质量。
+### Windows PowerShell
 
-## 工作流程
-
-```mermaid
-flowchart LR
-    A[故事或创作要求] --> B[文本模型生成结构化初稿]
-    B --> C[JSON 提取、归一化与 Pydantic 校验]
-    C --> D[独立审查模型返回修订]
-    D --> E[用户确认或编辑分镜]
-    E --> F[图片 Provider 逐格生成无字画面]
-    F --> G[本地绘制对白、旁白、思考和拟声词]
-    G --> H[漫画页面自动排版]
-    H --> I[预览、局部重生成与版本回退]
-    I --> J[PNG / PDF / project.json]
-```
-
-付费图片生成与剧本生成是分开的。用户可以先检查分镜，再决定是否调用真实图片 Provider，避免因文本错误浪费生图费用。
-
-## 已实现功能
-
-### 剧本与分镜
-
-- 输入主题、自然语言要求或已有故事。
-- 生成标题候选、故事梗概、角色设定和 Story Bible。
-- 生成场景、动作、出场角色、构图、子镜头和英文绘图提示词。
-- 生成 `speech`、`thought`、`narration`、`sfx` 四类结构化漫画文字。
-- 文本创作模型与审查模型独立选择。
-- 审查稿支持完整项目、局部 patch 和部分 panels；安全合并失败时保留已验证初稿继续生图。
-- JSON 代码块提取、常见字段归一化、有限修复重试和 Pydantic 边界校验。
-- 可见文字语言检查与针对性修复，只有图片 Prompt 使用英文。
-- 分镜确认后再生图，也可使用一键生成。
-
-### 图片与角色参考
-
-- 文本 Provider 与图片 Provider 独立切换。
-- 单图、多格和严格无 fallback smoke test 路线。
-- 本地 ComfyUI API Workflow 动态替换 prompt、negative prompt、宽、高、seed 和参考图。
-- Gemini 生成与参考图编辑；参考图可按当前分格角色自动筛选和映射。
-- 用户参考图批量上传、剪贴板导入、顺序展示和拖动排序。
-- 有参考图时避免在最终 Prompt 中重复冲突的发型、服装和配色描述。
-- 单格重生成、旧图归档和历史版本回退。
-- 每格独立记录真实 Provider、模型、请求参数、耗时、错误和 fallback。
-
-### 排字、布局与项目管理
-
-- 本地绘制对白气泡、思想气泡、旁白框和拟声词。
-- 中文换行、气泡尾巴、文字锚点、预留区域与基础避让。
-- 传统漫画页、规则网格、竖向条漫和自定义画框。
-- 整页预览；全屏后支持滚轮缩放、左键拖动和双击复位。
-- 导出 PNG、单页 PDF 和完整 `project.json`。
-- 重新载入项目 JSON，继续修改和局部生成。
-- 生图后切换内容语言并重新渲染本地文字。
-
-## Provider 状态
-
-状态说明：
-
-- **实现/注册**：代码入口存在，并已加入注册表和前端选项。
-- **真实验收**：真实 API 或本地模型返回了可解码结果，且没有发生 Mock 回退。
-- 自动化假 transport 测试通过不等于真实 Provider 验收。
-
-### 文本 Provider
-
-| Provider | 实现/注册 | 当前验收状态 | 主要用途与限制 |
-|---|:---:|---|---|
-| Mock Text | ✅ | 离线闭环已验证 | 确定性测试和无密钥演示；不代表真实大模型质量 |
-| Ollama | ✅ | 本机 `qwen3:4b` 已真实生成 | 本地免费；小模型生成长 JSON 和审查时稳定性有限 |
-| OpenAI-compatible | ✅ | 已有真实生成和审查应用记录 | 可连接兼容 Chat Completions 的服务；不同后端格式和 token 上限有差异 |
-| DeepSeek | ✅ | `deepseek-v4-flash` 已完成四格初稿与审查闭环 | 当前高质量文本候选；仍需继续统计 8–20 格多轮成功率 |
-
-### 图片 Provider
-
-| Provider | 实现/注册 | 当前验收状态 | 主要用途与限制 |
-|---|:---:|---|---|
-| Mock Image | ✅ | 离线闭环已验证 | 文本组合测试和备用展示；不是实际生图质量 |
-| Gemini Image | ✅ | 中转协议无参考图、单参考图及 ComicForge 四格真实生成已完成，四格无 Mock 回退 | 当前云端候选路线；第三方中转的费用和稳定性由中转服务决定 |
-| Recraft | ✅ | 多次真实手测及四格无回退记录 | 已验证云端 Demo 路线；跨格角色身份仍可能漂移 |
-| ComfyUI | ✅ | 本地严格单图及多格无回退记录 | 本地免费、工作流可控；依赖模型文件、自定义节点、显存和队列状态 |
-| SiliconFlow | ✅ | 国际站鉴权、模型列表和目标模型存在性已验证；未完成收费生图 | 账户余额为 0 时不能把鉴权成功写成真实生图验收 |
-| OpenAI Images | ✅ | 尚未真实验收 | 已预留生成、参考图编辑、多参考图和蒙版接口 |
-| Together | ✅ | 尚未真实验收 | 已完成代码适配和离线协议测试 |
-| fal | ✅ | 尚未真实验收 | 已完成异步队列适配和离线协议测试 |
-
-完整证据和限制见[阶段进度报告](docs/STAGE4_PROGRESS_REPORT.md)与[模型调研及选型](docs/MODEL_RESEARCH_AND_SELECTION.md)。
-
-## 快速开始
-
-### 1. 环境要求
-
-- Windows PowerShell（文档命令以 Windows 为例）
-- Python `>=3.11,<3.12`
-- 可选：Ollama、ComfyUI 或云端 Provider API Key
-
-### 2. 创建环境并安装
+在项目根目录依次执行：
 
 ```powershell
-git clone https://github.com/simonwang0207-lab/ComicForge-AI.git
-Set-Location ComicForge-AI
 py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[test]"
-Copy-Item .env.example .env
-```
-
-`.env` 已被 Git 忽略。请只把真实 API Key 写入本机 `.env`，不要写入代码、README、截图或终端记录。
-
-### 3. 启动应用
-
-```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe app.py
 ```
 
 浏览器访问：<http://127.0.0.1:7860>
 
-如果没有 API Key 或本地模型，在前端选择 **Mock Text** 和 **Mock Image** 即可完成离线流程。
+### macOS / Linux
 
-## 常用 Provider 配置
+```bash
+python3.11 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python app.py
+```
 
-这里只展示变量名称和安全示例；完整配置见 [`.env.example`](.env.example)。修改 `.env` 后需要重新启动前端。
+浏览器访问：<http://127.0.0.1:7860>
+
+> 首次运行不需要创建 `.env`。进入前端后选择 **Mock Text** 和 **Mock Image**，即可在无网络、无 API Key、无本地模型的情况下验证完整流程。
+
+如果使用 Git 获取项目：
+
+```powershell
+git clone https://github.com/simonwang0207-lab/ComicForge-AI.git
+Set-Location ComicForge-AI
+```
+
+如果收到的是 ZIP 压缩包，解压后在包含 `app.py` 的目录打开终端，再执行上述安装命令。
+
+## 第一次使用
+
+启动前端后，建议先完成一次无费用验证：
+
+1. 在“文本创作模型”中选择 **Mock Text**。
+2. 在“剧本审查模型”中选择 **不审查**或 Mock。
+3. 在“图片模型”中选择 **Mock Image**。
+4. 输入故事主题，例如“哪吒在东海保护渔民”。
+5. 选择漫画格数、内容语言和布局模式。
+6. 先生成剧本和分镜，检查结构化结果。
+7. 确认后生成图片，查看漫画预览。
+8. 下载 PNG、PDF 或项目 JSON。
+
+这次验证可以确认 Python 环境、依赖、前端、分镜、排字、布局和文件导出均能正常工作，但不代表任何外部 API 或本地模型已经配置成功。
+
+![ComicForge AI 漫画示例](docs/assets/project_delivery/22.png)
+
+## 主要功能
+
+### 剧本设计与审查
+
+- 输入主题、自然语言创作要求或已有故事。
+- 生成标题候选、故事梗概、角色设定和 Story Bible。
+- 生成每格的场景、动作、角色、构图、子镜头和英文图片 Prompt。
+- 结构化保存对白、思考、旁白和拟声词。
+- 文本创作模型与剧本审查模型可以独立选择。
+- 审查失败或修订稿无法安全合并时，保留已经通过校验的初稿，不阻断后续生图。
+- 对模型 JSON 进行代码块提取、字段归一化、有限修复和 Pydantic 校验。
+- 前端支持 1–20 格创作，核心服务不固定为四格或八格。
+
+### 图片生成与角色参考
+
+- 文本 Provider 与图片 Provider 独立组合。
+- 支持 Mock、云端图片 API 和本地 ComfyUI 工作流。
+- 按分格角色筛选参考图，并记录实际使用的角色和参考图数量。
+- 支持参考图批量导入、剪贴板粘贴、顺序展示和拖动排序。
+- 使用参考图时，最终 Prompt 优先保持参考人物的脸、发型、服装和配色，只改变动作、表情、场景与镜头。
+- 支持单格重新生成、旧版本归档和回退，避免整页重新生成。
+- 每格记录实际 Provider、模型、Prompt、尺寸、耗时、request ID、seed、错误和 fallback 状态。
+
+### 本地排字、布局与导出
+
+- 图片模型只生成无字画面；漫画文字由 Pillow 在本地绘制。
+- 支持对白气泡、思想气泡、旁白框和拟声词。
+- 支持中文换行、气泡尾巴、文字锚点、预留区域和基础避让。
+- 支持传统漫画页、规则网格、竖向条漫和自定义画框。
+- 全屏预览支持滚轮缩放、左键拖动画布和双击复位。
+- 导出最终漫画 PNG、单页 PDF 和完整 `project.json`。
+- 可重新载入项目 JSON，继续查看、修改或局部生成。
+
+## 系统工作流程
+
+```mermaid
+flowchart LR
+    A[故事或创作要求] --> B[文本模型生成结构化初稿]
+    B --> C[JSON 提取、归一化与 Pydantic 校验]
+    C --> D{是否启用独立审查}
+    D -- 是 --> E[审查模型返回完整稿或局部修订]
+    D -- 否 --> F[用户确认分镜]
+    E --> F
+    F --> G[图片 Provider 逐格生成无字画面]
+    G --> H[程序本地绘制漫画文字]
+    H --> I[自动排版与页面组合]
+    I --> J[预览、局部重生成与版本回退]
+    J --> K[PNG / PDF / project.json]
+```
+
+付费图片生成与剧本设计是分开的。使用者可以先用文本模型完成并检查分镜，再决定是否调用收费图片 Provider。
+
+## Provider 支持状态
+
+状态定义：
+
+- **已实现/注册**：代码适配器存在，已经加入注册表和前端选项。
+- **已真实验收**：真实 API 或本地工作流曾返回有效结果，且没有发生 Mock 回退。
+- **使用者需配置**：仓库不包含密钥、账户余额、本地模型权重或正在运行的模型服务。
+
+### 文本 Provider
+
+| Provider | 已实现/注册 | 项目现有验收记录 | 新环境要求 |
+|---|:---:|---|---|
+| Mock Text | ✅ | 离线闭环已验证 | 无 |
+| Ollama | ✅ | 本机 `qwen3:4b` 有真实生成记录 | 安装并启动 Ollama，下载模型 |
+| OpenAI-compatible | ✅ | 有真实生成和审查记录 | 兼容 Chat Completions 的服务、Key 和模型 ID |
+| DeepSeek | ✅ | 有真实调用记录 | DeepSeek 或兼容服务的 Key 和模型 ID |
+
+### 图片 Provider
+
+| Provider | 已实现/注册 | 项目现有验收记录 | 新环境要求 |
+|---|:---:|---|---|
+| Mock Image | ✅ | 离线闭环已验证 | 无 |
+| Gemini Image | ✅ | 无参考图、参考图及四格项目均有真实生成记录 | Gemini 或兼容网关的 Key、协议模式和模型 ID |
+| Recraft | ✅ | 多次真实手测和四格无回退记录 | Recraft API Key |
+| ComfyUI | ✅ | 严格单图及多格无回退记录 | ComfyUI、模型权重、自定义节点和 API Workflow |
+| SiliconFlow | ✅ | 已验证鉴权、模型列表和目标模型存在；尚未完成收费生图验收 | API Key、正确区域端点和可用余额 |
+| OpenAI Images | ✅ | 尚未真实验收 | API Key、可用图片模型和余额 |
+| Together | ✅ | 仅完成代码适配和离线协议测试 | API Key、模型 ID 和余额 |
+| fal | ✅ | 仅完成代码适配和离线队列测试 | API Key、模型 ID 和余额 |
+
+> 上表描述的是项目开发阶段已有证据，不保证另一台电脑上的外部服务自动可用。新使用者只要完成 Python 依赖安装即可运行程序；真实 Provider 是否可用取决于自己的配置。
+
+## 配置真实模型
+
+### 配置文件规则
+
+真实模型是可选项。需要时先复制配置模板：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+macOS / Linux：
+
+```bash
+cp .env.example .env
+```
+
+然后使用文本编辑器修改项目根目录下的 `.env`。修改后必须停止并重新启动 `app.py`，前端选项和状态才会刷新。
+
+安全要求：
+
+- `.env.example` 只保存变量名和安全默认值，可以提交。
+- `.env` 保存个人密钥和本机配置，已经被 Git 忽略，不应发送给其他人。
+- 不要把真实 Key 写入代码、README、截图、测试或终端日志。
+- 不要提交 `outputs/`、模型权重或包含敏感信息的项目记录。
+
+### 通用运行配置
+
+```dotenv
+COMICFORGE_OUTPUT_DIR=outputs
+COMICFORGE_SERVER_NAME=127.0.0.1
+COMICFORGE_SERVER_PORT=7860
+
+TEXT_MODEL_FALLBACK_TO_MOCK=true
+IMAGE_MODEL_FALLBACK_TO_MOCK=true
+IMAGE_PANEL_CONCURRENCY=1
+```
+
+如果端口 7860 被占用，可以改为其他空闲端口，例如 `7861`。
 
 ### Ollama 本地文本模型
+
+先在系统中安装 Ollama，然后执行：
 
 ```powershell
 ollama serve
 ollama pull qwen3:4b
 ```
 
+`.env`：
+
 ```dotenv
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3:4b
+OLLAMA_GENERATION_TIMEOUT=300
+OLLAMA_REVIEW_TIMEOUT=90
 ```
 
-### DeepSeek 文本模型
+Ollama 与 ComfyUI 可能同时占用显存。项目可在切换到本地生图前尝试释放 Ollama 模型，但实际显存仍取决于使用者的硬件和模型。
+
+### OpenAI-compatible 文本接口
+
+适用于提供 OpenAI Chat Completions 兼容协议的服务：
+
+```dotenv
+OPENAI_COMPATIBLE_BASE_URL=
+OPENAI_COMPATIBLE_API_KEY=
+OPENAI_COMPATIBLE_MODEL=
+OPENAI_COMPATIBLE_MAX_TOKENS=4096
+```
+
+不同兼容服务对模型名、结构化输出、thinking 参数和 token 上限的支持不同，应以服务商文档为准。
+
+### DeepSeek 文本接口
 
 ```dotenv
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_MAX_TOKENS=32768
+DEEPSEEK_MAX_RETRY_TOKENS=65536
 ```
 
-### Gemini 图片模型
+如果账户实际提供的模型 ID 不同，请使用控制台或模型列表返回的完整 ID，不要凭展示名称猜测。
 
-官方与第三方兼容服务的协议、模型名和计费方式可能不同，请以实际服务为准：
+### Gemini 图片接口
+
+项目支持官方 Gemini 路线，也支持实现相同协议的兼容网关。协议模式必须与服务端一致：
 
 ```dotenv
 GEMINI_API_KEY=
@@ -177,17 +261,44 @@ GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 GEMINI_API_MODE=interactions
 GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
 GEMINI_IMAGE_SIZE=1K
+GEMINI_GENERATION_TIMEOUT=300
 GEMINI_MAX_RETRIES=0
 ```
 
-按次计费的图片服务默认不自动重试，避免超时后产生重复扣费。
+使用 Gemini-compatible `generateContent` 网关时：
 
-### ComfyUI 本地工作流
+```dotenv
+GEMINI_API_MODE=generate-content
+GEMINI_GENERATE_CONTENT_CONFIG_MODE=image-config
+```
 
-1. 启动 ComfyUI，确认 <http://127.0.0.1:8188/system_stats> 可访问。
-2. 安装工作流需要的 checkpoint、IPAdapter 自定义节点和 CLIP Vision 权重。
-3. 使用 **API Format** Workflow JSON，不要直接使用普通 UI Workflow JSON。
-4. 配置：
+模型名称必须使用服务端模型列表返回的完整 ID。按次计费服务建议保持 `GEMINI_MAX_RETRIES=0`，防止不确定的重复扣费。
+
+### Recraft 图片接口
+
+```dotenv
+RECRAFT_API_KEY=
+RECRAFT_MODEL=recraftv4_1
+RECRAFT_IMAGE_ENDPOINT=https://external.api.recraft.ai/v1/images/generations
+```
+
+### ComfyUI 本地图片工作流
+
+源码包可以在没有 ComfyUI 的情况下正常启动；只有选择 ComfyUI Provider 时才需要以下外部环境：
+
+1. 安装并启动 ComfyUI。
+2. 安装所选 Workflow 引用的 checkpoint。
+3. 如果 Workflow 使用 IPAdapter，安装对应自定义节点、IPAdapter 模型和 CLIP Vision 权重。
+4. 从 ComfyUI 导出 **API Format** Workflow JSON；普通界面 Workflow JSON 不能直接提交到 `/prompt`。
+5. 核对 JSON 中 prompt、宽度、高度、seed、negative prompt 和参考图节点 ID。
+
+先确认服务可访问：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8188/system_stats
+```
+
+`.env` 示例：
 
 ```dotenv
 COMFYUI_BASE_URL=http://127.0.0.1:8188
@@ -199,11 +310,25 @@ COMFYUI_HEIGHT_NODE_ID=5
 COMFYUI_SEED_NODE_ID=3
 COMFYUI_NEGATIVE_PROMPT_NODE_ID=
 COMFYUI_REFERENCE_IMAGE_NODE_ID=
+IMAGE_MODEL_MAX_POLL_SECONDS=300
 ```
 
-仓库不包含大型模型权重。更换 Workflow 后必须重新核对节点 ID 和模型依赖。
+仓库中的 Workflow 是接口模板，不包含大型模型权重。换用其他 Workflow 时，模型名和节点 ID 通常也需要一起修改。
 
-## 输出文件
+### 其他图片 Provider
+
+完整变量均列在 [`.env.example`](.env.example) 中：
+
+| Provider | 关键变量 |
+|---|---|
+| OpenAI Images | `OPENAI_IMAGE_BASE_URL`、`OPENAI_IMAGE_API_KEY`、`OPENAI_IMAGE_MODEL` |
+| SiliconFlow | `SILICONFLOW_API_KEY`、`SILICONFLOW_MODEL`、`SILICONFLOW_IMAGE_ENDPOINT` |
+| Together | `TOGETHER_API_KEY`、`TOGETHER_MODEL`、`TOGETHER_IMAGE_ENDPOINT` |
+| fal | `FAL_KEY`、`FAL_MODEL`、`FAL_BASE_URL` |
+
+只有代码适配或配置检测成功，不等于真实生图验收。首次接入建议先生成一张低风险测试图，再开始多格任务。
+
+## 输出文件与项目重载
 
 每次完整生成通常会创建：
 
@@ -212,17 +337,67 @@ outputs/<时间_主题>/
 ├── panel_01.png
 ├── panel_02.png
 ├── ...
-├── panel_versions/       # 单格重生成历史
-├── comic.png             # 最终漫画
-├── comic.pdf             # 单页 PDF
-└── project.json          # 项目结构与生成溯源
+├── panel_versions/       # 单格重新生成前的历史版本
+├── comic.png             # 最终漫画 PNG
+├── comic.pdf             # 漫画 PDF
+└── project.json          # 项目结构、分镜和生成溯源
 ```
 
-`outputs/` 属于运行产物并已被 Git 忽略。`project.json` 不保存 API Key，也不会保存完整图片 Base64。
+`project.json` 可用于重新加载项目，包含：
 
-## 无费用测试
+- 故事、角色、Story Bible 和分镜；
+- 每格最终图片 Prompt；
+- 参考角色名称和参考图数量；
+- 请求与实际 Provider、模型、耗时和 request ID；
+- 图片相对路径、尺寸、seed、错误和 fallback 状态。
 
-以下命令使用 Mock 或注入的假 HTTP transport，不会调用真实收费 API：
+项目记录不会保存 API Key，也不会嵌入完整图片 Base64。移动项目输出时，应整体移动对应输出目录，避免相对图片路径失效。
+
+## 项目结构
+
+```text
+ComicForge-AI/
+├── app.py                         # Gradio 应用入口
+├── pyproject.toml                 # Python 包、版本和依赖声明
+├── requirements.txt               # 直接安装依赖列表
+├── .env.example                   # 无密钥的配置模板
+├── src/comicforge_ai/
+│   ├── ui.py                      # 界面、状态展示和回调连接
+│   ├── service.py                 # 文本、审查、生图、保存和局部重生成编排
+│   ├── schemas.py                 # Pydantic 核心数据模型
+│   ├── models/                    # 文本/图片 Provider、注册表、HTTP 和错误类型
+│   ├── prompts/                   # 剧本、审查、修复和图片 Prompt 模板
+│   ├── bubble_renderer.py         # 本地漫画文字与气泡绘制
+│   └── layout.py                  # 页面布局、组合和导出
+├── workflows/                     # ComfyUI API Workflow 与备份
+├── scripts/                       # 预览和 Provider smoke test
+├── tests/                         # 不访问真实 API 的自动化测试
+├── docs/                          # 成果、技术、演进、模型、Provider 和 Demo 文档
+├── TASKS.md                       # 已完成任务和后续优先级
+└── AGENTS.md                      # 项目开发约束
+```
+
+### 核心设计原则
+
+- 文本模型统一实现 `TextModelProvider`，通过 `TextModelRegistry` 注册。
+- 图片模型统一实现 `ImageProvider`，通过 `ImageProviderRegistry` 注册。
+- UI 不写死模型厂商；文本创作、审查和图片模型可独立切换。
+- Provider 的 URL、鉴权、请求体和响应解析只存在于对应适配器中。
+- 模型输出只能通过安全 JSON 工具和 Pydantic 解析，不执行模型返回内容。
+- 每次只向图片 Provider 发送一格的视觉 Prompt；漫画文字和整页排版由本地程序完成。
+- Provider 失败、Mock 回退和审查未应用必须在界面与项目记录中可见。
+
+## 测试与开发命令
+
+### 安装为可编辑开发包
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+```
+
+### 不产生外部费用的检查
+
+以下命令不会主动调用真实 API：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
@@ -231,87 +406,134 @@ outputs/<时间_主题>/
 git diff --check
 ```
 
-如果开发环境已经安装 Ruff，还可以运行：
+如果安装了 Ruff：
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check app.py src tests scripts
 ```
 
-真实 Provider 只能通过单独的 smoke test 或前端手动测试验收，可能产生费用：
+### 图片 Provider 严格单图测试
+
+下面的脚本不会使用 Mock 掩盖失败，但真实云端 Provider 可能收费：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\smoke_test_image_provider.py `
   --provider comfyui `
   --model animagine-xl-4.0-ipadapter `
   --prompt "single comic scene, no text" `
-  --width 512 --height 512
+  --width 512 `
+  --height 512
 ```
 
-## 项目结构
+自动化测试通过只说明代码路径和离线协议符合预期，不等于外部 API、账户余额或本地工作流已经真实验收。
 
-```text
-ComicForge-AI/
-├── app.py                         # 应用入口
-├── src/comicforge_ai/
-│   ├── ui.py                      # Gradio 界面和回调编排
-│   ├── service.py                 # 漫画生成、审查、生图、保存和局部重生成服务
-│   ├── schemas.py                 # Pydantic 核心数据模型
-│   ├── models/                    # 文本/图片 Provider、注册表、HTTP 与错误类型
-│   ├── prompts/                   # 剧本、审查、语言修复和图片 Prompt
-│   ├── bubble_renderer.py         # 本地漫画文字与气泡绘制
-│   └── layout.py                  # 页面布局、组合与导出
-├── workflows/                     # ComfyUI API Workflow
-├── scripts/                       # 预览与 Provider smoke test
-├── tests/                         # 不访问真实 API 的自动化测试
-├── docs/                          # 技术文档、阶段报告和 Demo 材料
-├── .env.example                   # 可迁移的配置模板
-└── TASKS.md                       # 已完成任务与后续优先级
+## 常见问题
+
+### 1. `python` 版本不正确
+
+确认版本：
+
+```powershell
+py -3.11 --version
 ```
 
-## 架构原则
+项目要求 Python 3.11。不要直接复用装有大量不相关依赖的全局环境。
 
-- 文本模型实现统一 `TextModelProvider`，通过 `TextModelRegistry` 注册。
-- 图片模型实现统一 `ImageProvider`，通过 `ImageProviderRegistry` 注册。
-- Provider 的 URL、鉴权、请求体和响应解析只存在于对应适配器中。
-- Gradio 只收集输入、调用服务和格式化结果，不承载 Provider 协议逻辑。
-- 模型输出只用安全 JSON 工具和 Pydantic 解析，绝不执行模型输出。
-- 每次只向图片 Provider 发送一格的视觉 Prompt；漫画文字和整页排版在本地完成。
-- 不支持的 Provider 参数必须显式拒绝，不能静默忽略。
-- Mock fallback 只有在配置允许时发生，并始终暴露实际 Provider 和失败原因。
+### 2. 前端没有出现刚配置的 Provider
 
-## 文档导航
+- 确认修改的是项目根目录的 `.env`，不是 `.env.example`。
+- 检查 Key、模型 ID 和必要 URL 是否填写。
+- 完全停止旧的 `app.py` 进程后重新启动。
+- 查看前端 Provider 状态信息；“已注册”不代表“已配置”。
 
-- [项目成果与技术说明](docs/PROJECT_DELIVERY_REPORT.md)
-- [完整技术文档](docs/TECHNICAL_DOCUMENTATION.md)
-- [第三阶段及后续改进进度报告](docs/STAGE4_PROGRESS_REPORT.md)
-- [Demo 功能清单与录制脚本](docs/DEMO_RECORDING_SCRIPT.md)
-- [文本与图片模型调研及选型](docs/MODEL_RESEARCH_AND_SELECTION.md)
-- [模型调研 Word 版本](docs/MODEL_RESEARCH_AND_SELECTION.docx)
-- [图片 Provider 配置与验收指南](docs/IMAGE_PROVIDER_GUIDE.md)
-- [漫画质量改进记录](docs/STAGE3_COMIC_QUALITY_PROGRESS_REPORT.md)
-- [第二阶段进度报告](docs/STAGE2_PROGRESS_REPORT.md)
-- [第一天进度报告](docs/DAY1_PROGRESS_REPORT.md)
-- [任务状态与后续优先级](TASKS.md)
-- [旧版 README 归档](docs/README_ARCHIVE_2026-08-12.md)
+### 3. 端口 7860 被占用
+
+在 `.env` 中修改：
+
+```dotenv
+COMICFORGE_SERVER_PORT=7861
+```
+
+重启后访问 <http://127.0.0.1:7861>。
+
+### 4. 文本模型返回 JSON 校验错误
+
+这表示模型已经返回内容，但字段、枚举、语言或分格数量不符合项目结构，并非网络一定断开。可以：
+
+- 缩短故事或减少首次测试格数；
+- 增大对应 Provider 的输出 token 上限；
+- 换用结构化输出更稳定的文本模型；
+- 保留已经通过校验的初稿，并关闭独立审查后继续测试图片链路。
+
+### 5. ComfyUI 连接成功但生成失败或超时
+
+依次检查：
+
+1. `/system_stats` 是否可访问；
+2. ComfyUI 队列和终端是否仍有进度；
+3. checkpoint、自定义节点、IPAdapter 和 CLIP Vision 是否齐全；
+4. Workflow 是否为 API Format；
+5. 环境变量中的节点 ID 是否与当前 JSON 一致；
+6. 图片是否已生成但总耗时超过轮询上限。
+
+不要仅通过无限增加超时时间掩盖模型加载、显存不足或工作流节点错误。
+
+### 6. 云端请求失败
+
+检查 Key、账户余额、模型 ID、区域 endpoint、限流和服务端状态。第三方兼容网关的接口与官方协议可能不同，应以该网关实际返回的模型列表和接口文档为准。
+
+### 7. 中文字体显示异常
+
+程序会搜索常见 Windows、macOS 和 Linux 中文字体。目标机器没有可用中文字体时，请安装支持中文的字体后重新生成排字结果。
 
 ## 当前限制
 
-- 角色参考图和 IPAdapter/Gemini 编辑可以改善一致性，但不能保证跨格身份、服装和比例完全一致。
-- 当前 ComfyUI Workflow 每格只有一个 IPAdapter 图片入口；多人同框的独立身份锁定需要多 IPAdapter 或区域约束工作流。
+- 角色参考图、IPAdapter 和图片编辑模型能够改善一致性，但不能保证跨格人物身份、服装和比例完全一致。
+- 当前 ComfyUI Workflow 每格主要使用一个参考图入口；多人同框的独立身份约束仍需多 IPAdapter、区域控制或专门编辑工作流。
+- 小型文本模型生成长篇或 8–20 格项目时，仍可能出现输出截断、字段缺失或结构不稳定。
 - 本地模型受显存、模型加载和 ComfyUI 队列影响；云端模型受网络、余额、速率限制和费用影响。
-- 小型文本模型仍可能输出截断或结构不完整的 JSON；系统会修复或明确失败，但不能保证每次成功。
-- 多页数据结构已经预留，但尚未形成完整的多页编辑、整册管理和整册导出 UI 闭环。
-- 当前是单机 Gradio 应用，尚未完成用户系统、公网部署和多人实时协作。
-- OpenAI Images、Together、fal 尚未完成真实生成验收；SiliconFlow 尚未完成收费生图验收。
+- `ComicPage/page_number` 等多页数据结构已有预留，但尚未完成多页编辑、整册管理和整册导出的完整 UI 验收。
+- 当前是单机 Gradio 应用，尚未实现用户系统、公网部署和多人实时协作。
+- OpenAI Images、Together 和 fal 尚未完成项目级真实生成验收；SiliconFlow 尚未完成收费生图验收。
 
-## 后续方向
+## 源码交付说明
 
-- 提升 8–20 格长项目的文本结构稳定性和审查成功率。
-- 升级 ComfyUI 多角色参考、区域约束或 Qwen-Image-Edit 工作流。
-- 完整实现多页编辑和整册导出。
-- 增加可视化气泡拖拽、缩放和样式编辑。
-- 增加部署、用户权限、配额和任务队列能力。
+将项目交给其他人运行时，至少应保留：
+
+```text
+app.py
+pyproject.toml
+requirements.txt
+README.md
+.env.example
+src/
+workflows/
+```
+
+建议同时保留 `tests/`、`scripts/`、`docs/`、`TASKS.md` 和 `AGENTS.md`，便于验收、维护和理解项目。不要打包：
+
+- `.env` 和任何真实 API Key；
+- `.venv/`；
+- `__pycache__/`、`.pytest_cache/`；
+- 大型模型权重；
+- 不需要提交的 `outputs/` 运行产物。
+
+接收者安装 Python 3.11 和 `requirements.txt` 后即可启动，并可使用 Mock 完成离线演示。真实 API 和本地工作流由接收者自行配置，不影响程序启动。
+
+## 文档导航
+
+文档按用途组织，不再按开发日期或临时阶段拆分：
+
+| 文档 | 适合读者 | 主要内容 |
+|---|---|---|
+| [项目成果报告](docs/PROJECT_REPORT.md) | 成果验收人员 | 项目目标、最终功能、关键改进、验收证据和局限性 |
+| [技术指南](docs/TECHNICAL_GUIDE.md) | 新开发者、维护人员 | 架构、数据模型、生成流程、Provider 扩展、安全和测试 |
+| [开发演进与问题复盘](docs/DEVELOPMENT_HISTORY.md) | 后续开发者 | 原阶段记录合并后的问题、原因、改进方法、成效与事实边界 |
+| [模型调研与选型评估](docs/MODEL_EVALUATION.md) | 模型选型与成本评估人员 | 文本/图片候选模型、官方信息、优缺点、成本和当前选择 |
+| [Provider 配置与验收指南](docs/PROVIDER_GUIDE.md) | 部署和模型接入人员 | 云端及 ComfyUI 配置、能力差异、错误边界和严格验收 |
+| [任务与验收状态](TASKS.md) | 项目维护人员 | 当前完成项、Provider 验收矩阵和 P0/P1/P2 待办 |
+
 
 ---
 
-ComicForge AI 当前定位是一个可运行、可扩展、可追溯的多模型漫画制作平台原型。README 中的“已实现”“已配置”和“真实验收”均按不同状态记录，不以自动化测试代替真实 API 验收。
+ComicForge AI 当前是一个可运行、可扩展、可追溯的多模型漫画制作平台原型。本文档严格区分“代码已实现”“本机曾真实验收”和“新使用者已完成配置”，不以自动化测试代替真实 Provider 验收。

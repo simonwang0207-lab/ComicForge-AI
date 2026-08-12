@@ -1,6 +1,6 @@
-# ComicForge AI 技术文档
+# ComicForge AI 技术指南
 
-> 面向项目评审、开发与维护人员。更新于 2026-08-06，适配 Python 3.11 与项目版本 0.3.0。
+> 面向开发与维护人员。更新于 2026-08-12，适配 Python 3.11 与项目版本 0.3.0。
 
 ## 1. 项目简介、目标与使用场景
 
@@ -17,6 +17,7 @@ flowchart LR
     TR --> MT[Mock Text]
     TR --> OT[Ollama]
     TR --> OAT[OpenAI Compatible]
+    TR --> DS[DeepSeek]
     S --> V[Pydantic schemas + JSON parser]
     S --> IR[ImageProviderRegistry]
     IR --> MI[Mock Image]
@@ -26,6 +27,7 @@ flowchart LR
     IR --> TG[Together]
     IR --> FAL[fal]
     IR --> CU[ComfyUI]
+    IR --> GI[Gemini Image]
     S --> BR[Bubble renderer]
     S --> L[Layout/composition]
     L --> O[PNG / PDF / project.json]
@@ -49,7 +51,7 @@ ComicForge-AI/
 ├── scripts/                       # smoke test 与离线预览
 ├── tests/                         # 不访问真实外部服务的自动化测试
 ├── workflows/                     # ComfyUI API Workflow 与备份
-├── docs/                          # 阶段、配置、技术和 Demo 文档
+├── docs/                          # 成果、技术、演进、模型、Provider 和 Demo 文档
 └── outputs/                       # 运行产物；不应提交
 ```
 
@@ -87,7 +89,7 @@ ComicForge-AI/
 
 ## 6. 统一文本 Provider 架构
 
-所有文本模型实现 `models/base.py` 的 `TextModelProvider`。`TextModelRegistry` 按稳定 `model_id` 注册、查找和生成 UI 选项。`build_default_registry()` 从环境变量构造 Mock、Ollama 和 OpenAI Compatible；主流程和 UI 不按 Provider ID 编写生成分支。
+所有文本模型实现 `models/base.py` 的 `TextModelProvider`。`TextModelRegistry` 按稳定 `model_id` 注册、查找和生成 UI 选项。`build_default_registry()` 从环境变量构造 Mock、Ollama、OpenAI Compatible 和 DeepSeek；主流程和 UI 不按 Provider ID 编写生成分支。
 
 ### 6.1 Mock Provider
 
@@ -105,6 +107,10 @@ Mock 文本和图片 Provider 提供确定性离线闭环，用于自动化测�
 
 该 Provider 适配提供 `/models` 与 `/chat/completions` 的兼容服务，可用于创作或审查。它支持模型名、最大 token、Qwen3 thinking 开关与 reasoning effort 配置。兼容接口并不保证所有服务的响应完全一致，因此解析层仍需校验，且当前项目不能把某一次后端成功推广为所有兼容平台均已验收。
 
+### 6.4 DeepSeek
+
+`DeepSeekTextModel` 使用独立的 Base URL、Key、模型、生成/审查超时和 token 配置，通过 DeepSeek 或兼容 Chat Completions 协议完成创作和审查。Provider 保留统一解析与 Pydantic 边界，并针对实际返回的安全可恢复字段差异进行有限归一化。当前已有真实初稿和审查项目记录，但长达 8–20 格的多轮成功率仍需持续统计。
+
 ## 7. 图片生成数据流与统一 Provider
 
 1. 用户确认已经通过 Pydantic 的分镜。
@@ -116,7 +122,7 @@ Mock 文本和图片 Provider 提供确定性离线闭环，用于自动化测�
 7. `bubble_renderer.py` 在原图上绘制结构化文字，`layout.py` 组合页面。
 8. 保存 `panel_XX.png`、`comic.png`、`comic.pdf` 和 `project.json`。
 
-`ImageProviderRegistry` 注册 Mock、OpenAI Images、Recraft、Together、SiliconFlow、fal 和 ComfyUI。注册只说明代码入口存在；是否配置或真实验收应另行判断。
+`ImageProviderRegistry` 注册 Mock、OpenAI Images、Recraft、Together、SiliconFlow、fal、ComfyUI 和 Gemini。注册只说明代码入口存在；是否配置或真实验收应另行判断。
 
 ## 8. 云端图片 Provider
 
@@ -135,6 +141,10 @@ Provider 使用原生 `image_size`、`batch_size`、`images` 和 seed 协议，�
 - fal：实现队列提交、状态轮询、结果获取和最大轮询期限。
 
 三者均已实现、注册并有离线协议测试，但当前工作区没有凭据配置或真实生成验收证据。
+
+### 8.4 Gemini Image
+
+`GeminiImageProvider` 支持官方 `interactions` 和兼容网关 `generate-content` 两种模式，解析 inline image 数据并保存为本地图片。它支持按顺序传入当前分格匹配的角色参考图，并根据分格宽高向服务端表达目标宽高比。当前已有无参考图、单参考图和 ComicForge 四格真实生成记录；第三方网关是否完整执行官方尺寸、比例和多参考参数仍需逐项验收。
 
 ## 9. ComfyUI Provider 与 API Workflow
 
@@ -192,7 +202,7 @@ Gradio 前端由侧栏设置、任务状态、漫画画布和“分镜与剧本/
 ## 13. 本地运行
 
 ```powershell
-Set-Location F:\ZJU_intership\task\2\ComicForge-AI
+# 在包含 app.py 的项目根目录执行
 Copy-Item .env.example .env
 .\.venv\Scripts\python.exe app.py
 ```
@@ -246,12 +256,14 @@ Invoke-RestMethod http://127.0.0.1:8188/system_stats
 | 通用文本 | `TEXT_MODEL_*`（含独立的 `TEXT_MODEL_REVIEW_TIMEOUT`）、`RELEASE_TEXT_MODEL_BEFORE_LOCAL_IMAGE` |
 | Ollama | `OLLAMA_BASE_URL/MODEL/*TIMEOUT/NUM_PREDICT/NUM_CTX` |
 | OpenAI Compatible 文本 | `OPENAI_COMPATIBLE_BASE_URL/API_KEY/MODEL/MAX_TOKENS` |
+| DeepSeek 文本 | `DEEPSEEK_BASE_URL/API_KEY/MODEL/*TIMEOUT/MAX_TOKENS` |
 | 通用图片 | `IMAGE_MODEL_*`、`IMAGE_PANEL_CONCURRENCY`、`IMAGE_PROVIDER_FALLBACK_CHAIN` |
 | OpenAI Images | `OPENAI_IMAGE_BASE_URL/API_KEY/MODEL/SIZE` |
 | Recraft | `RECRAFT_API_KEY/MODEL/IMAGE_ENDPOINT` |
 | Together | `TOGETHER_API_KEY/MODEL/IMAGE_ENDPOINT` |
 | SiliconFlow | `SILICONFLOW_API_KEY/MODEL/IMAGE_ENDPOINT` |
 | fal | `FAL_KEY/MODEL/BASE_URL` |
+| Gemini | `GEMINI_API_KEY/BASE_URL/API_MODE/IMAGE_MODEL/IMAGE_SIZE` |
 | ComfyUI | `COMFYUI_BASE_URL/WORKFLOW_PATH/MODEL/*NODE_ID` |
 
 完整空白模板见 [`.env.example`](../.env.example)。不要在命令历史、截图、文档或 Git 中写真实 Key。

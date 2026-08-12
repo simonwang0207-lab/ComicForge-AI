@@ -1,229 +1,136 @@
-# ComicForge AI Tasks
+# ComicForge AI 任务与验收状态
 
-## Day 1 — Project skeleton and Mock Demo
+> 本文件只维护当前能力、验收事实和后续优先级。完整开发过程与问题复盘见 [`docs/DEVELOPMENT_HISTORY.md`](docs/DEVELOPMENT_HISTORY.md)。
 
-- [x] Create a standard Python `src/` project structure
-- [x] Define the initial Pydantic comic data models
-- [x] Implement story and storyboard generation with `MockTextModel`
-- [x] Implement Pillow placeholder panels with `MockImageModel`
-- [x] Compose panels into a comic page
-- [x] Add a Chinese Gradio interface
-- [x] Preview and export PNG results
-- [x] Add project documentation and baseline pytest coverage
+## 状态说明
 
-## Stage 2 — Real text models and unified Provider architecture
+- `[x]`：代码或文档工作已经完成，并经过与风险相称的检查。
+- `[ ]`：尚未完成或仍需人工/真实平台验收。
+- Provider 的“已实现、已注册、已配置、已连通、已真实生成”是不同状态，不能互相替代。
+- 自动化测试不会访问真实收费 API，通过测试不等于真实 Provider 已验收。
 
-- [x] Define a common `TextModelProvider` contract and friendly error types
-- [x] Add provider IDs, display names, runtime types, model names, and status checks
-- [x] Keep `MockTextModel` as the always-available offline provider
-- [x] Add local Ollama HTTP provider
-- [x] Disable Qwen3 thinking with `think=false` and `/no_think` compatibility fallback
-- [x] Separate connection, status, and generation timeouts (300-second generation default)
-- [x] Distinguish connection, HTTP, missing-model, and generation-timeout errors
-- [x] Record provider request duration and original exceptions
-- [x] Add generic OpenAI-compatible Chat Completions provider
-- [x] Add environment-based provider registry and lookup
-- [x] Separate comic-generation and JSON-repair prompts from providers
-- [x] Extract plain or Markdown-fenced JSON without `eval`
-- [x] Validate model output through expanded Pydantic schemas
-- [x] Add one configurable JSON repair retry
-- [x] Support arbitrary positive panel counts in schemas and service
-- [x] Reserve page grouping through `ComicPage` and `page_number`
-- [x] Add explicit Mock fallback with failure reason and provider provenance
-- [x] Add model selection and availability checks to Gradio
-- [x] Preserve Mock images, page composition, preview, and PNG export
-- [x] Add fully mocked HTTP and regression tests
-- [x] Verify real Ollama generation with local `qwen3:4b` and no Mock fallback
-- [x] Update configuration and documentation
+## 当前已完成能力
 
-## Next — Stage 3 candidates
+### 工程与统一架构
 
-- [ ] Verify one chosen OpenAI-compatible service with a locally supplied credential
-- [x] Define a common image-model Provider interface and registry
-- [x] Integrate a generic OpenAI-compatible Images API provider
-- [x] Support URL and `b64_json` image responses with local PNG persistence
-- [x] Keep Mock Image as the offline provider and per-panel fallback
-- [x] Add image-provider error classification and strict no-fallback mode
-- [x] Persist image provenance, prompts, relative paths, timing, and fallback in `project.json`
-- [x] Add independent text/image Provider controls and status display to Gradio
-- [x] Add mocked image HTTP, fallback, security, persistence, and layout tests
-- [ ] Add project JSON reload support
-- [ ] Add per-panel editing and selective regeneration
-- [ ] Add configurable page templates, speech bubbles, and multi-page export
-- [ ] Add prompt/version metadata and generation cost or timing telemetry
+- [x] 建立 Python 3.11 `src/` 工程、依赖声明和 Gradio 应用入口。
+- [x] 使用 Pydantic 定义故事、角色、分镜、漫画文字、图片记录、页面和项目数据。
+- [x] 建立 `TextModelProvider`、`ImageProvider` 及各自注册表。
+- [x] 文本创作、独立审查和图片生成可分别选择 Provider。
+- [x] Provider 专用 URL、鉴权、请求体、响应解析和轮询逻辑与 UI/主流程隔离。
+- [x] 环境变量构建 Provider；`.env.example` 不包含真实密钥和私密绝对路径。
+- [x] Mock 文本与图片保持确定性，可在无外部服务时完成离线演示。
+- [x] 建立安全错误类型、凭据脱敏、下载限制、Pillow 解码验证和显式 fallback 记录。
 
-## Stage 3 — Image Provider 2.0
+### 文本、审查与结构化分镜
 
-- [x] Add unified `ImageGenerationRequest` and `ImageGenerationResult`
-- [x] Add machine-readable `ImageProviderCapabilities` and model definitions
-- [x] Add configuration, authentication, balance, rate-limit, timeout, response,
-  content-policy, and unsupported-capability errors
-- [x] Reject unsupported advanced parameters instead of silently ignoring them
-- [x] Add secure URL download limits, base64 decoding, and Pillow validation
-- [x] Add bounded exponential retry for 429, 5xx, connection, and timeout failures
-- [x] Keep 400/401/402/403 and content-policy failures non-retryable
-- [x] Implement Mock Image Provider
-- [x] Implement OpenAI Images generations and edits with multiple images and Mask
-- [x] Implement Recraft Image Provider
-- [x] Implement Together Image Provider
-- [x] Implement SiliconFlow native `image_size`/`batch_size`/`images` protocol
-- [x] Implement fal queue submission, status polling, and result retrieval
-- [x] Implement ComfyUI workflow submission, history polling, `/view` download,
-  and IPAdapter reference-image upload/replacement
-- [x] Build Provider/model registry metadata for dynamic Gradio controls
-- [x] Add advanced image settings, capability display, strict mode, and concurrency
-- [x] Add primary → secondary → Mock per-panel fallback chain
-- [x] Persist Provider, model, operation, request ID, seed, parameters, timing,
-  fallback, and safe errors without base64 or credentials
-- [x] Add credential-safe one-image smoke-test script
-- [x] Add fully offline HTTP Mock tests for P0 protocols and failure behavior
+- [x] 接入 Mock、Ollama、OpenAI-compatible 和 DeepSeek 文本 Provider。
+- [x] 支持纯 JSON/Markdown 代码块提取、有限字段归一化和 Pydantic 校验。
+- [x] 识别输出截断、缺字段、枚举错误、语言错误和格数不一致。
+- [x] 支持有上限的 JSON 修复和可见漫画文字专项修复。
+- [x] 支持独立审查模型；准确区分 `script_reviewed` 与 `review_applied`。
+- [x] 审查稿可返回完整项目、项目 patch 或部分 panels；按 sequence 安全合并。
+- [x] 审查无法安全合并时保留已验证初稿，不阻断后续生图。
+- [x] 审查使用紧凑叙事快照和独立超时，避免重复传输纯视觉字段。
+- [x] 支持标题候选、故事梗概、Story Bible、角色、动作、构图、子镜头和结构化文字项。
+- [x] 前端支持 1–20 格；核心 schema/service 不硬编码四格或八格。
 
-## Image Provider P1
+### 图片生成与角色参考
 
-- [x] Implement and register Gemini Image Provider with no-cost fake transport tests
-  - Environment: `GEMINI_API_KEY`, `GEMINI_IMAGE_MODEL`
-  - Added official `interactions` and compatible `generate-content` protocol modes
-  - Direct gateway smoke tests completed for one text-to-image request and one single-reference request; ComicForge front-end end-to-end acceptance remains pending
-  - Protocol: Google Generative Language `/v1beta/interactions`; normalize inline
-    image content, support ordered reference-image inputs, and persist only local files
-  - [x] Offline acceptance: text-to-image payload, reference image, base64 validation,
-    local PNG save, registry configuration, provenance, and no base64 persistence
-  - [ ] Real acceptance: API authentication, strict single image, reference-image
-    identity A/B test, 401/429/5xx, timeout, safety rejection, and four-panel run
-- [ ] DashScope Image Provider
-  - Environment: `DASHSCOPE_API_KEY`, `DASHSCOPE_IMAGE_MODEL`
-  - Protocol: official DashScope image-synthesis/multimodal generation endpoint;
-    submit task, poll task status endpoint, then securely download results
-  - Acceptance: task ID, terminal success/failure, maximum poll time, URL safety,
-    authentication, balance/rate-limit mapping, and Mock HTTP tests
-- [ ] Volcengine Ark Image Provider
-  - Environment: `ARK_API_KEY`, `ARK_IMAGE_MODEL`
-  - Protocol: Ark `/api/v3/images/generations`; normalize URL/base64 and supported
-    size/seed/quality fields after reconfirming the selected model documentation
-  - Acceptance: request mapping, response normalization, policy/limit errors,
-    redaction, retry boundaries, and strict-mode tests
-- [ ] Replicate Image Provider
-  - Environment: `REPLICATE_API_TOKEN`, `REPLICATE_MODEL`
-  - Protocol: `/v1/models/{owner}/{name}/predictions` or deployment prediction;
-    follow returned polling/cancel URLs and normalize output URL list
-  - Acceptance: asynchronous starting/processing/succeeded/failed/canceled states,
-    cancel support, maximum poll time, URL validation, and fully mocked tests
-- [ ] xAI Image Provider
-  - Environment: `XAI_API_KEY`, `XAI_IMAGE_MODEL`
-  - Protocol: xAI `/v1/images/generations`; map supported count/format fields and
-    normalize URL/base64 only after reconfirming current official documentation
-  - Acceptance: configuration, generation, response validation, error taxonomy,
-    redaction, retry boundaries, and strict-mode tests
+- [x] 接入 Mock、OpenAI Images、Recraft、Together、SiliconFlow、fal、ComfyUI 和 Gemini 图片 Provider。
+- [x] 定义 Provider 能力，显式处理 seed、尺寸、比例、参考图、mask、negative prompt 和异步轮询差异。
+- [x] 支持 URL、Base64、Gemini inlineData 和 ComfyUI 输出的本地安全保存。
+- [x] 支持逐格生成、每格独立失败与 fallback、实际 Provider/模型/耗时/request ID/seed 记录。
+- [x] 支持批量上传、剪贴板导入、顺序展示和拖动排序角色参考图。
+- [x] 参考图按 Story Bible 角色顺序映射，并按当前分格出场角色筛选。
+- [x] 启用参考图时，以参考身份为最高优先级，过滤冲突的发型、服装和配色描述。
+- [x] ComfyUI 对远景、环境、群像和多人同框旁路当前单图 IPAdapter，避免人物特征污染。
+- [x] 在 `project.json` 记录 `reference_count`、`reference_character_names` 和最终 Prompt。
+- [x] 支持单格重生成、旧图归档和可逆版本回退。
 
-## Stage 3 — Comic quality P0
+### 漫画制作与前端
 
-- [x] Split script review/confirmation from paid image generation
-- [x] Add story bible, factual/causal review, automatic revision, and repair retry
-- [x] Add backward-compatible structured speech/thought/narration/sfx items
-- [x] Add character positions, speaker anchors, and reserved bubble regions
-- [x] Replace the full-width bottom caption bar with comic bubble rendering
-- [x] Add language-aware wrapping and fonts for zh-CN, en, and ja-JP
-- [x] Reuse full character/style definitions in every image prompt
-- [x] Add clean negative-space composition instructions before image generation
-- [x] Add editable storyboard table and project JSON reload to Gradio
-- [x] Add natural-language story correction and full-storyboard redesign before images
-- [x] Persist user story guidance in project JSON and validate revised output
-- [x] Accumulate multi-round story revisions instead of replacing earlier constraints
-- [x] Add editable final title and non-generic title candidates
-- [x] Add selectable manual-review and explicit automatic generation modes
-- [x] Add grid, vertical webtoon, and adaptive traditional-page composition
-- [x] Add optional inset/split/montage subshots inside one generated panel
-- [x] Cap speech tails, omit unanchored tails, and compact narration cards
-- [x] Add immersive organic bubbles, text-only narration, rotated SFX, and optional panel numbers
-- [x] Prefer low-detail lettering regions using image edge-density scoring
-- [x] Keep four-panel traditional pages equal-width and remove blurred ratio padding
-- [x] Reuse a strict project-wide palette, rendering, and natural-skin style lock in every image request
-- [x] Re-render existing raw panels in another language without new image Provider calls
-- [x] Cache multiple lettering localizations in project JSON for free language switching
-- [x] Add optional plus-button custom frames while preserving automatic layout defaults
-- [x] Validate paired half-row frames before any paid image request
-- [x] Generate and letter custom panels at the closest Provider-supported aspect ratio
-- [x] Persist and reload custom frame order in project JSON
-- [x] Select any custom frame and insert after it or delete it directly
-- [x] Move creation controls into a collapsible sidebar with a clearer glass-tech theme
-- [x] Replace the five workflow accordions with a settings-only sidebar and visible task hub/tabs
-- [x] Make manual/automatic mode switch visible primary actions and valid layout choices
-- [x] Hide the custom-frame editor unless manual custom layout is active
-- [x] Make storyboard count the single source of truth for every page layout
-- [x] Initialize, resize, and cap custom frames to the selected storyboard count
-- [x] Add selected-frame type replacement without changing storyboard length
-- [x] Promote story redesign, language switching, and export to main workspace tabs
-- [x] Accept an optional full story/script before the first storyboard generation
-- [x] Use story, character, speaker, scene, and action context for comic localization
-- [x] Add first-run guidance and reorder the main workspace around the task sequence
-- [x] Add fit-to-window and width-reading preview modes without changing PNG resolution
-- [x] Reduce visible UI copy; remove the visually inconsistent light/dark experiment and keep one stable light theme
-- [x] Derive image dimensions from page/frame layout and hide low-level controls unless the selected Provider supports them
-- [x] Replace technical image labels with user-facing Chinese descriptions and hide unavailable reference/edit inputs
-- [x] Export the final composed comic as both PNG and PDF
-- [x] Reject unchanged text in manual language mode instead of reporting false success
-- [x] Promote one cue-rich panel to a purposeful inset when a text model ignores multi-shot mode
-- [x] Display each panel's actual requested generation ratio after rendering
-- [x] Preserve Recraft no-Seed behavior and Seed-capable Provider behavior
-- [x] Add offline multilingual bubble preview and P0 regression tests
+- [x] 图片 Provider 只生成无字分格，本地绘制对白、思考、旁白和拟声词。
+- [x] 支持中文/英文/日文换行、字体回退、角色锚点、预留区和边缘密度位置评分。
+- [x] 支持分镜表格编辑、故事补充重做、文字位置覆盖和生图后语言重排。
+- [x] 支持传统漫画页、规则网格、竖向条漫、自定义画框和有限插入镜头。
+- [x] 支持项目 JSON 保存与重载、PNG/PDF 导出和相对路径溯源。
+- [x] 全屏预览支持滚轮缩放、左键拖动和双击复位。
+- [x] 前端展示配置状态、请求/实际 Provider、模型、耗时、错误、审查状态和 fallback。
 
-## Stage 3 — Comic quality P1
+### 测试、文档与交付
 
-- [x] Score bubble regions using image edge density
-- [ ] Extend placement scoring with subject/face detection and manual overrides
-- [x] Add per-panel manual lettering-position overrides in the storyboard editor
-- [ ] Add manual bubble dragging and per-panel position adjustment
-- [x] Add single-panel regeneration
-- [x] Archive single-panel image revisions and allow reversible per-panel rollback
-- [x] Add irregular bubble outlines and rotated SFX
-- [ ] Add perspective SFX and selectable comic-lettering font packs
-- [x] Add an Animagine XL + IPAdapter character-reference workflow for ComfyUI
-- [x] Initially reuse the first generated subject panel as a ComfyUI reference; retire this strategy after testing showed that a story panel leaks its pose, background, and close-up framing into later panels
-- [x] Require explicit clean character references for ComfyUI instead of silently treating a finished story panel as an identity reference
-- [x] Guide ordered character-reference upload in the UI, support batch import/reordering and clipboard append, bind by story-bible order, and persist the actual referenced character names per panel
-- [x] Restrict whole-image ComfyUI references to single-character close/medium shots; bypass them for wide, establishing, aerial, environment, crowd, and multi-character panels
-- [x] Make uploaded reference identity authoritative over conflicting generated character traits and expose a scrollable ordered upload list
-- [x] Normalize a valid top-level review panel subset into a sequence-based patch without weakening panel-count validation
-- [x] Normalize compact text-provider storyboards into a provider-independent panel contract before image generation
-- [x] Allow a separately selected script-review Provider
+- [x] 自动化测试使用假 HTTP transport，不调用真实外部 API。
+- [x] 提供严格无 Mock fallback 的单图 Provider smoke test。
+- [x] 提供气泡和页面布局离线预览脚本。
+- [x] 建立面向使用者的 README 和无密钥配置模板。
+- [x] 将零散日期/阶段记录合并为统一开发演进文档。
+- [x] 建立项目报告、技术指南、Provider 指南、模型评估和 Demo 指南。
 
-## 2026-08-06 — Documentation archive and current acceptance
+## Provider 验收矩阵
 
-- [x] Create the third-stage and post-stage progress archive in `docs/STAGE4_PROGRESS_REPORT.md`
-- [x] Create complete architecture, configuration, extension, and operations documentation
-- [x] Create a verified feature inventory and 2–3 minute Recraft Demo recording script
-- [x] Synchronize README Provider status without equating implementation, configuration, authentication, and real generation
-- [x] Record Recraft as real-generation accepted based on existing no-fallback output records
-- [x] Record ComfyUI as strict 512x512 single-image accepted and retain later no-fallback project evidence
-- [x] Record SiliconFlow international authentication and model-list validation separately from real generation
-- [ ] Complete a paid SiliconFlow image-generation acceptance after the account has usable balance
-- [ ] Configure and independently accept OpenAI Images, Together, and fal before marking them real-generation ready
+### 文本 Provider
 
-## Next priorities
+| Provider | 已实现/注册 | 真实调用记录 | 当前结论 |
+|---|:---:|:---:|---|
+| Mock Text | ✅ | 离线确定性 | 可用于无配置演示与测试 |
+| Ollama | ✅ | ✅ | 本机 `qwen3:4b` 有真实生成记录；长 JSON 稳定性有限 |
+| OpenAI-compatible | ✅ | ✅ | 有真实生成和审查记录；具体表现取决于兼容后端 |
+| DeepSeek | ✅ | ✅ | 有初稿与审查真实项目记录；仍需统计 8–20 格多轮成功率 |
 
-### P0 — Demo reliability
+### 图片 Provider
 
-- [ ] Fix the three current Ruff findings in `service.py` and `ui.py`, then rerun the full free verification suite
-- [ ] Add visible per-panel image queue/progress state and distinguish queued, running, downloading, and timed out
-- [ ] Add failed-panel resume that reuses successful panels instead of restarting the full page
-- [ ] Maintain a repeatable Recraft four-panel and ComfyUI strict smoke acceptance checklist
-- [ ] Continue provider-independent review normalization without weakening required first-draft fields
-- [ ] Upgrade the ComfyUI API Workflow to multi-IPAdapter or regional conditioning for independent identities in multi-character panels
-- [x] Send a compact narrative-only review snapshot and separate review timeout from normal text generation
-- [x] Repair wrong-language comic lettering with a minimal sequence/index patch instead of regenerating the complete project JSON
-- [x] Make lettering repair deterministic and bounded, retrying only indexes that remain in the wrong content language
+| Provider | 已实现/注册 | 连通/鉴权 | 真实生成 | 当前结论 |
+|---|:---:|:---:|:---:|---|
+| Mock Image | ✅ | 不需要 | 离线确定性 | 可用于文本组合与无配置演示 |
+| Gemini Image | ✅ | ✅ | ✅ | 无参考、单参考及四格真实项目已有记录；第三方网关兼容性仍需逐项验收 |
+| Recraft | ✅ | ✅ | ✅ | 多次真实手测和四格无回退记录 |
+| ComfyUI | ✅ | ✅（本地） | ✅ | 严格单图及多格无回退记录；依赖本机工作流和模型 |
+| SiliconFlow | ✅ | ✅ | ❌ | 已验证模型列表与目标模型，余额为 0，未完成收费生图验收 |
+| OpenAI Images | ✅ | 未验收 | ❌ | 已适配和离线测试，尚未项目级真实验收 |
+| Together | ✅ | 未验收 | ❌ | 已适配和离线测试，尚未项目级真实验收 |
+| fal | ✅ | 未验收 | ❌ | 已适配和离线队列测试，尚未项目级真实验收 |
 
-### P1 — Quality and editing
+## 后续任务
 
-- [ ] Add manual bubble dragging and subject/face-aware placement
-- [ ] Add multi-character reference workflows, regional conditioning, or character LoRA support with measurable consistency tests
-- [ ] Complete and manually accept a multi-page UI, per-page editing, and whole-book export flow
-- [ ] Add perspective SFX and selectable lettering font packs
+### P0：运行与 Demo 稳定性
 
-### P2 — Deployment and provider expansion
+- [ ] 增加逐格图片任务进度，区分排队、生成、下载、排字和超时。
+- [ ] 增加失败分格续跑，复用已成功图片而不是重新生成整页。
+- [ ] 建立可重复的文本组合、Recraft、Gemini 和 ComfyUI 严格验收清单。
+- [ ] 对 1、4、8、20 格分别统计 DeepSeek 与已验证文本模型的结构成功率和耗时。
+- [ ] 持续归一化 Provider 间安全可恢复的结构差异，但不放松初稿必要字段。
 
-- [ ] Add authenticated task queues, user isolation, remote storage, and a controlled deployment path
-- [ ] Real-generation test each currently unaccepted cloud Provider with explicit user budget approval
-- [x] Research DeepSeek/Gemini and add separate registry-driven Providers with offline tests
-- [ ] Configure and real-accept DeepSeek + Gemini with explicit user budget approval
-- [ ] Evaluate the unregistered DashScope, Volcengine Ark, Replicate, and xAI candidates one at a time
+### P1：角色一致性与编辑质量
+
+- [ ] 升级 ComfyUI 多 IPAdapter、区域条件、角色 LoRA 或图片编辑工作流。
+- [ ] 建立同一组角色参考的 A/B 测试和可量化一致性评价。
+- [ ] 增加主体/人脸感知的气泡避让。
+- [ ] 支持画布内直接拖拽、缩放和调整气泡样式。
+- [ ] 增加透视拟声词和可选漫画字体包。
+- [ ] 完成多页编辑、逐页重生成和整册导出的 UI 验收。
+
+### P2：部署与 Provider 扩展
+
+- [ ] 增加任务队列、用户身份、项目隔离、远程存储和受控部署。
+- [ ] 在用户明确授权预算后，逐一真实验收 OpenAI Images、Together、fal 和 SiliconFlow。
+- [ ] 逐一评估 DashScope、Volcengine Ark、Replicate 和 xAI，避免同时接入未验收 Provider。
+
+## 免费验证基线
+
+从项目根目录执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m compileall -q app.py src tests
+.\.venv\Scripts\python.exe -c "import app; assert app.demo"
+git diff --check
+```
+
+如已安装 Ruff：
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check app.py src tests scripts
+```
+
+真实 Provider 验收必须由使用者主动执行，并在记录中同时标明模型、耗时、request ID、输出文件和 fallback 状态。

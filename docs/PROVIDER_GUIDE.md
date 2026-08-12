@@ -1,6 +1,47 @@
-# Image Provider 2.0 配置与验收指南
+# ComicForge AI Provider 配置与验收指南
 
-## 架构与安全边界
+## 文本 Provider 配置
+
+文本创作模型与剧本审查模型使用同一套 `TextModelProvider` 边界，并可在前端独立选择。
+模型返回内容还会经过 JSON 提取、归一化和 Pydantic 校验，因此“接口请求成功”不代表
+“剧本结构一定有效”。
+
+| Provider | 关键配置 | 当前验收边界 |
+|---|---|---|
+| Mock Text | 无 | 离线确定性闭环 |
+| Ollama | `OLLAMA_BASE_URL`、`OLLAMA_MODEL` | 本机 `qwen3:4b` 有真实生成记录 |
+| OpenAI-compatible | `OPENAI_COMPATIBLE_BASE_URL/API_KEY/MODEL` | 有真实调用记录；不同兼容后端能力不同 |
+| DeepSeek | `DEEPSEEK_BASE_URL/API_KEY/MODEL` | 有初稿与审查真实项目记录 |
+
+Ollama 示例：
+
+```dotenv
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3:4b
+OLLAMA_GENERATION_TIMEOUT=300
+OLLAMA_REVIEW_TIMEOUT=90
+```
+
+OpenAI-compatible 示例：
+
+```dotenv
+OPENAI_COMPATIBLE_BASE_URL=
+OPENAI_COMPATIBLE_API_KEY=
+OPENAI_COMPATIBLE_MODEL=
+OPENAI_COMPATIBLE_MAX_TOKENS=4096
+```
+
+DeepSeek 示例：
+
+```dotenv
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_MAX_TOKENS=32768
+DEEPSEEK_MAX_RETRY_TOKENS=65536
+```
+
+## 图片 Provider 架构与安全边界
 
 图片层统一使用 `ImageGenerationRequest`、`ImageGenerationResult`、
 `ImageProviderCapabilities` 和 `ImageProvider`。Gradio 只读取注册表与能力，
@@ -22,6 +63,7 @@ API Key 只能放在本机进程环境变量或被 Git 忽略的 `.env` 中。�
 | SiliconFlow | 是 | 是 | 最多 3 张 | 否 | 是 | 是 | 是 | 否 | 是 |
 | fal | 是 | 否 | 否 | 否 | 否 | 是 | 是 | 是 | 是 |
 | ComfyUI | 是 | 取决于 workflow；当前支持单参考图上传/IPAdapter 替换 | 否 | 否 | 取决于节点映射 | 取决于节点映射 | 否 | 是 | 取决于节点映射 |
+| Gemini | 是 | 是 | 是，按分格筛选 | 否 | 否 | 否 | 否 | 否 | 使用平台比例与分辨率档位 |
 
 能力由 Provider 返回，页面据此启用或禁用参数。不支持的参数在服务请求前抛出
 `UnsupportedCapabilityError`，不会被静默丢弃。
@@ -131,6 +173,23 @@ workflow 必须是 ComfyUI “API format” JSON。程序复制 workflow 后写�
 更换 checkpoint 或 workflow 后仍需重新验收。协议：
 [ComfyUI Server Routes](https://docs.comfy.org/development/comfyui-server/comms_routes)。
 
+### Gemini Image
+
+```dotenv
+GEMINI_API_KEY=
+GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta
+GEMINI_API_MODE=interactions
+GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
+GEMINI_IMAGE_SIZE=1K
+GEMINI_MAX_RETRIES=0
+```
+
+Provider 支持官方 `interactions` 和兼容网关 `generate-content`。后者使用
+`/v1beta/models/{model}:generateContent`，模型 ID 应以服务端模型列表为准。当前已有
+无参考图、单参考图和四格真实生成记录。按次计费网关默认不自动重试，避免请求结果
+不确定时发生重复扣费。网关声称兼容 Gemini 不等于支持全部官方参数，比例、多参考图和
+错误计费仍需通过单图测试与账单逐项确认。
+
 ## 单图真实验收
 
 先在本机 `.env` 配置对应 Provider，然后执行：
@@ -147,12 +206,13 @@ workflow 必须是 ComfyUI “API format” JSON。程序复制 workflow 后写�
 使用注入的 HTTP Mock；真实付费请求只应由用户主动运行该脚本或在页面生成。
 
 当前真实验收边界：Recraft 已完成多次真实生图；ComfyUI 已完成严格本地生图；
+Gemini 已完成无参考、单参考和四格真实生成；
 SiliconFlow 已完成国际站鉴权和模型列表验证，但因余额为 0 尚未真实收费生图；
 OpenAI Images、Together 和 fal 尚未配置或真实验收。实现或自动化测试通过不等于
 真实平台验收。
 
-## P1 边界
+## 后续 Provider 边界
 
-Gemini、DashScope、Volcengine、Replicate 和 xAI 尚未实现，也不会出现在注册表。
-协议入口、变量和验收标准记录在 `TASKS.md`。正式接入前必须重新核对平台官方
-文档，并增加完全离线的请求/响应和异步轮询测试。
+DashScope、Volcengine、Replicate 和 xAI 目前只在配置模板或任务清单中预留，尚未
+注册为可用 Provider。正式接入前必须重新核对官方文档，并增加完全离线的请求、响应、
+错误和异步轮询测试；完成代码适配后仍需单独进行真实验收。
