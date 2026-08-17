@@ -523,12 +523,12 @@ workflows/
 ## 文档导航
 | 文档 | 适合读者 | 主要内容 |
 |---|---|---|
-| [项目成果报告](docs/PROJECT_REPORT.md) | 成果验收人员 | 项目目标、最终功能、关键改进、验收证据和局限性 |
+| [项目成果报告](docs/PROJECT_REPORT.md) | 使用者 | 项目目标、最终功能、关键改进和局限性 |
 | [技术指南](docs/TECHNICAL_GUIDE.md) | 新开发者、维护人员 | 架构、数据模型、生成流程、Provider 扩展、安全和测试 |
-| [开发演进与问题复盘](docs/DEVELOPMENT_HISTORY.md) | 后续开发者 | 原阶段记录合并后的问题、原因、改进方法、成效与事实边界 |
+| [开发演进与问题复盘](docs/DEVELOPMENT_HISTORY.md) | 后续开发者 | 问题、原因、改进方法与事实边界 |
 | [模型调研与选型评估](docs/MODEL_EVALUATION.md) | 模型选型与成本评估人员 | 文本/图片候选模型、官方信息、优缺点、成本和当前选择 |
-| [Provider 配置与验收指南](docs/PROVIDER_GUIDE.md) | 部署和模型接入人员 | 云端及 ComfyUI 配置、能力差异、错误边界和严格验收 |
-| [任务与验收状态](TASKS.md) | 项目维护人员 | 当前完成项、Provider 验收矩阵和 P0/P1/P2 待办 |
+| [Provider 配置与验收指南](docs/PROVIDER_GUIDE.md) | 部署和模型接入人员 | 云端及 ComfyUI 配置、能力差异、错误边界 |
+| [任务与验收状态](TASKS.md) | 项目维护人员 | 当前完成项和 P0/P1/P2 待办 |
 
 ---
 ComicForge AI 当前是一个可运行、可扩展、可追溯的多模型漫画制作平台原型。
