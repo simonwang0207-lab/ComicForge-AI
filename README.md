@@ -496,30 +496,6 @@ COMICFORGE_SERVER_PORT=7861
 - 当前是单机 Gradio 应用，尚未实现用户系统、公网部署和多人实时协作。
 - OpenAI Images、Together 和 fal 尚未完成项目级真实生成验收；SiliconFlow 尚未完成收费生图验收。
 
-## 源码交付说明
-
-将项目交给其他人运行时，至少应保留：
-
-```text
-app.py
-pyproject.toml
-requirements.txt
-README.md
-.env.example
-src/
-workflows/
-```
-
-建议同时保留 `tests/`、`scripts/`、`docs/`、`TASKS.md` 和 `AGENTS.md`，便于验收、维护和理解项目。不要打包：
-
-- `.env` 和任何真实 API Key；
-- `.venv/`；
-- `__pycache__/`、`.pytest_cache/`；
-- 大型模型权重；
-- 不需要提交的 `outputs/` 运行产物。
-
-接收者安装 Python 3.11 和 `requirements.txt` 后即可启动，并可使用 Mock 完成离线演示。真实 API 和本地工作流由接收者自行配置，不影响程序启动。
-
 ## 文档导航
 | 文档 | 适合读者 | 主要内容 |
 |---|---|---|
